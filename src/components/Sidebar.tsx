@@ -95,7 +95,6 @@ export function Sidebar({
 }: SidebarProps) {
   const savedPIDs = Object.keys(peers);
   const unknownOnNet = Object.keys(registry).filter((did) => !registry[did].isMe && !registry[did].knownPID);
-  const isRouter = networkRole.startsWith('Router');
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
   const [nsExpanded, setNsExpanded] = useState(true);

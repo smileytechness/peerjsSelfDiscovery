@@ -94,6 +94,9 @@ export function useP2P() {
   const startCall = useCallback((pid: string, kind: 'audio' | 'video' | 'screen') => p2p.startCall(pid, kind), []);
   const pingContact = useCallback((pid: string) => p2p.pingContact(pid), []);
   const deleteContact = useCallback((pid: string) => p2p.deleteContact(pid), []);
+  const editMessage = useCallback((pid: string, id: string, content: string) => p2p.editMessage(pid, id, content), []);
+  const deleteMessage = useCallback((pid: string, id: string) => p2p.deleteMessage(pid, id), []);
+  const retryMessage = useCallback((pid: string, id: string) => p2p.retryMessage(pid, id), []);
   const setOfflineMode = useCallback((offline: boolean) => {
     p2p.setOfflineMode(offline);
     setOfflineModeState(offline);
@@ -122,6 +125,9 @@ export function useP2P() {
     startCall,
     pingContact,
     deleteContact,
+    editMessage,
+    deleteMessage,
+    retryMessage,
     setOfflineMode,
     setNamespaceOffline,
     p2p,

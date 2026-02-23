@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChatMessage } from '../lib/types';
 import { loadFile, loadFileMeta } from '../lib/store';
-import { Send, Paperclip, Phone, Video, Monitor, Download, File, ArrowLeft, Info } from 'lucide-react';
+import { Send, Paperclip, Phone, Video, Monitor, Download, File, ArrowLeft, Info, Pencil, Trash2, RotateCcw, Check, CheckCheck, Clock, AlertCircle } from 'lucide-react';
 import { clsx } from 'clsx';
 
 interface ChatAreaProps {
@@ -13,11 +13,30 @@ interface ChatAreaProps {
   onCall: (kind: 'audio' | 'video' | 'screen') => void;
   onBack: () => void;
   onContactInfo: () => void;
+  onEditMessage: (id: string, content: string) => void;
+  onDeleteMessage: (id: string) => void;
+  onRetryMessage: (id: string) => void;
 }
 
-const MessageItem: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
+function StatusIcon({ status }: { status?: string }) {
+  if (status === 'delivered') return <CheckCheck size={11} className="text-blue-400" />;
+  if (status === 'sent') return <Check size={11} className="text-gray-400" />;
+  if (status === 'failed') return <AlertCircle size={11} className="text-red-400" />;
+  return <Clock size={11} className="text-gray-600" />;
+}
+
+const MessageItem: React.FC<{
+  msg: ChatMessage;
+  onEdit: (id: string, content: string) => void;
+  onDelete: (id: string) => void;
+  onRetry: (id: string) => void;
+}> = ({ msg, onEdit, onDelete, onRetry }) => {
   const [fileData, setFileData] = useState<string | null>(null);
   const [meta, setMeta] = useState<any>(null);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(msg.content || '');
+  const [showActions, setShowActions] = useState(false);
+  const editRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (msg.type === 'file' && msg.tid) {
@@ -26,63 +45,141 @@ const MessageItem: React.FC<{ msg: ChatMessage }> = ({ msg }) => {
     }
   }, [msg]);
 
+  useEffect(() => {
+    if (editing && editRef.current) {
+      editRef.current.focus();
+      editRef.current.select();
+    }
+  }, [editing]);
+
   const isSent = msg.dir === 'sent';
+  const canEdit = isSent && msg.type === 'text' && !msg.deleted && msg.status !== 'failed';
+
+  const submitEdit = () => {
+    if (editValue.trim() && editValue.trim() !== msg.content) {
+      onEdit(msg.id, editValue.trim());
+    }
+    setEditing(false);
+  };
+
+  if (msg.deleted) {
+    return (
+      <div className={clsx('flex mb-1', isSent ? 'justify-end' : 'justify-start')}>
+        <span className="text-[11px] italic text-gray-600 px-3 py-1 bg-gray-800/50 rounded-lg">
+          {isSent ? 'You deleted this message' : 'Message deleted'}
+        </span>
+      </div>
+    );
+  }
 
   return (
-    <div className={clsx("flex flex-col mb-2 max-w-[70%]", isSent ? "self-end items-end" : "self-start items-start")}>
-      <div
-        className={clsx(
-          "p-2 rounded-lg text-sm break-words",
-          isSent ? "bg-blue-600 text-white rounded-br-none" : "bg-gray-800 text-gray-200 rounded-bl-none"
-        )}
-      >
-        {msg.type === 'file' ? (
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2 font-semibold">
-              <File size={16} /> {msg.name}
-            </div>
-            <div className="text-xs opacity-70">
-              {(msg.size ? (msg.size / 1024).toFixed(1) : '0')} KB
-            </div>
-            {fileData ? (
-              <div className="mt-2">
-                {msg.name?.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
-                  <img src={fileData} alt={msg.name} className="max-w-[200px] rounded" />
-                ) : (
-                  <a
-                    href={fileData}
-                    download={msg.name}
-                    className="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs text-white w-fit"
-                  >
-                    <Download size={12} /> Download
-                  </a>
-                )}
-              </div>
-            ) : (
-              <div className="text-xs italic opacity-50">Loading file...</div>
-            )}
+    <div
+      className={clsx('flex flex-col mb-2 max-w-[75%]', isSent ? 'self-end items-end' : 'self-start items-start')}
+      onMouseEnter={() => isSent && setShowActions(true)}
+      onMouseLeave={() => { setShowActions(false); }}
+    >
+      {/* Action buttons (hover, sent messages only) */}
+      {isSent && showActions && !editing && msg.type === 'text' && !msg.deleted && (
+        <div className="flex gap-1 mb-1">
+          {canEdit && (
+            <button
+              onClick={() => { setEditValue(msg.content || ''); setEditing(true); }}
+              className="p-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-400 hover:text-white"
+              title="Edit"
+            >
+              <Pencil size={11} />
+            </button>
+          )}
+          <button
+            onClick={() => onDelete(msg.id)}
+            className="p-1 bg-gray-700 hover:bg-red-900/60 rounded text-gray-400 hover:text-red-400"
+            title="Delete"
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      )}
+
+      {/* Bubble */}
+      {editing ? (
+        <div className="flex flex-col gap-1 w-full">
+          <textarea
+            ref={editRef}
+            value={editValue}
+            onChange={e => setEditValue(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitEdit(); }
+              if (e.key === 'Escape') setEditing(false);
+            }}
+            className="bg-blue-700 text-white text-sm rounded-lg p-2 resize-none focus:outline-none focus:ring-1 focus:ring-blue-400 min-w-[120px]"
+            rows={2}
+          />
+          <div className="flex gap-1 justify-end">
+            <button onClick={() => setEditing(false)} className="text-[10px] text-gray-400 hover:text-white px-2 py-0.5 bg-gray-700 rounded">Cancel</button>
+            <button onClick={submitEdit} className="text-[10px] text-white px-2 py-0.5 bg-blue-600 hover:bg-blue-700 rounded">Save</button>
           </div>
-        ) : (
-          msg.content
-        )}
-      </div>
+        </div>
+      ) : (
+        <div
+          className={clsx(
+            'p-2 rounded-lg text-sm break-words',
+            isSent ? 'bg-blue-600 text-white rounded-br-none' : 'bg-gray-800 text-gray-200 rounded-bl-none'
+          )}
+        >
+          {msg.type === 'file' ? (
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2 font-semibold">
+                <File size={16} /> {msg.name}
+              </div>
+              <div className="text-xs opacity-70">
+                {(msg.size ? (msg.size / 1024).toFixed(1) : '0')} KB
+              </div>
+              {fileData ? (
+                <div className="mt-2">
+                  {msg.name?.match(/\.(jpg|jpeg|png|gif|webp)$/i) ? (
+                    <img src={fileData} alt={msg.name} className="max-w-[200px] rounded" />
+                  ) : (
+                    <a
+                      href={fileData}
+                      download={msg.name}
+                      className="flex items-center gap-1 bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs text-white w-fit"
+                    >
+                      <Download size={12} /> Download
+                    </a>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs italic opacity-50">Loading file...</div>
+              )}
+            </div>
+          ) : (
+            <>
+              {msg.content}
+              {msg.edited && <span className="text-[9px] opacity-50 ml-1">(edited)</span>}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Timestamp + status */}
       <div className="text-[10px] text-gray-500 mt-0.5 flex items-center gap-1">
         <span>{new Date(msg.ts).toLocaleTimeString()}</span>
-        {isSent && (
-          <span className={clsx(
-            msg.status === 'delivered' ? 'text-blue-400' :
-            msg.status === 'sent'      ? 'text-gray-400' :
-                                         'text-gray-600'
-          )}>
-            {msg.status === 'delivered' ? '✓✓' : msg.status === 'sent' ? '✓' : '⏳'}
-          </span>
+        {isSent && <StatusIcon status={msg.status} />}
+        {isSent && msg.status === 'failed' && (
+          <button
+            onClick={() => onRetry(msg.id)}
+            className="flex items-center gap-0.5 text-red-400 hover:text-red-300 ml-1"
+            title="Retry"
+          >
+            <RotateCcw size={10} /> retry
+          </button>
         )}
       </div>
     </div>
   );
-}
+};
 
-export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFile, onCall, onBack, onContactInfo }: ChatAreaProps) {
+export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFile, onCall, onBack, onContactInfo, onEditMessage, onDeleteMessage, onRetryMessage }: ChatAreaProps) {
   const [input, setInput] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -144,9 +241,15 @@ export function ChatArea({ pid, friendlyName, messages, onSendMessage, onSendFil
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+      <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-1">
         {messages.map((msg) => (
-          <MessageItem key={msg.id || msg.ts} msg={msg} />
+          <MessageItem
+            key={msg.id || msg.ts}
+            msg={msg}
+            onEdit={onEditMessage}
+            onDelete={onDeleteMessage}
+            onRetry={onRetryMessage}
+          />
         ))}
         <div ref={messagesEndRef} />
       </div>

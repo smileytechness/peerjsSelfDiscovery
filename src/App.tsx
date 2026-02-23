@@ -7,10 +7,67 @@ import { SetupModal } from './components/SetupModal';
 import { ShareModal } from './components/ShareModal';
 import { ConnectModal } from './components/ConnectModal';
 import { MediaOverlay } from './components/MediaOverlay';
+import { CallingOverlay } from './components/CallingOverlay';
 import { NamespaceModal } from './components/NamespaceModal';
 import { p2p } from './lib/p2p';
 import { BUILD } from './lib/version';
 import { clsx } from 'clsx';
+
+// ── Simple Web Audio ringtones ────────────────────────────────────────────────
+
+function playTone(ctx: AudioContext, freq: number, duration: number, gain = 0.3) {
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.connect(g);
+  g.connect(ctx.destination);
+  osc.frequency.value = freq;
+  g.gain.setValueAtTime(gain, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+  osc.start(ctx.currentTime);
+  osc.stop(ctx.currentTime + duration);
+}
+
+function startRinging(interval: number, pattern: () => void): () => void {
+  pattern();
+  const id = setInterval(pattern, interval);
+  return () => clearInterval(id);
+}
+
+let _audioCtx: AudioContext | null = null;
+function getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new AudioContext();
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+
+function ringOutgoing() {
+  const ctx = getAudioCtx();
+  playTone(ctx, 440, 0.4);
+  setTimeout(() => playTone(ctx, 440, 0.4), 500);
+}
+
+function ringIncoming() {
+  const ctx = getAudioCtx();
+  playTone(ctx, 880, 0.2);
+  setTimeout(() => playTone(ctx, 660, 0.2), 250);
+  setTimeout(() => playTone(ctx, 880, 0.2), 500);
+}
+
+function playMessagePing() {
+  const ctx = getAudioCtx();
+  playTone(ctx, 1047, 0.12, 0.15); // C6, soft
+}
+
+// ── Toast types ───────────────────────────────────────────────────────────────
+
+interface Toast {
+  id: string;
+  pid: string;
+  fname: string;
+  preview: string;
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
   const {
@@ -30,6 +87,9 @@ export default function App() {
     startCall,
     pingContact,
     deleteContact,
+    editMessage,
+    deleteMessage,
+    retryMessage,
     setOfflineMode,
     setNamespaceOffline,
   } = useP2P();
@@ -41,16 +101,65 @@ export default function App() {
   const [showNamespaceInfo, setShowNamespaceInfo] = useState(false);
   const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   const [connRequest, setConnRequest] = useState<{ fname: string; accept: () => void; reject: () => void } | null>(null);
   const [incomingCall, setIncomingCall] = useState<{ call: any; fname: string; kind: string } | null>(null);
-  const [activeCall, setActiveCall] = useState<{ stream: MediaStream; localStream?: MediaStream; fname: string; kind: string; call: any } | null>(null);
+  const [callingState, setCallingState] = useState<{ fname: string; kind: 'audio' | 'video' | 'screen'; call: any; stream: MediaStream; cameraStream?: MediaStream } | null>(null);
+  const [activeCall, setActiveCall] = useState<{ stream: MediaStream; localStream?: MediaStream; cameraStream?: MediaStream; fname: string; kind: string; call: any } | null>(null);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+  const stopIncomingRing = useRef<(() => void) | null>(null);
+  const stopOutgoingRing = useRef<(() => void) | null>(null);
+  const activeChatRef = useRef<string | null>(null);
+
+  // Keep activeChatRef in sync so event handlers can read current value
+  useEffect(() => { activeChatRef.current = activeChat; }, [activeChat]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
+
+  // ── Toast for incoming messages ──────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: any) => {
+      const { pid, msg } = e.detail;
+      if (!msg || msg.dir !== 'recv' || msg.type === 'file') return;
+      if (activeChatRef.current === pid) return; // already viewing this chat
+      const fname = p2p.contacts[pid]?.friendlyName || pid;
+      const preview = msg.content?.slice(0, 60) || '';
+      const toast: Toast = { id: msg.id || crypto.randomUUID(), pid, fname, preview };
+      setToasts(prev => [...prev.slice(-4), toast]); // max 5 toasts
+      playMessagePing();
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toast.id)), 5000);
+    };
+    p2p.addEventListener('message', handler);
+    return () => p2p.removeEventListener('message', handler);
+  }, []);
+
+  // ── Incoming call ring ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (incomingCall) {
+      navigator.vibrate?.([400, 200, 400, 200, 400]);
+      stopIncomingRing.current = startRinging(3000, ringIncoming);
+    } else {
+      stopIncomingRing.current?.();
+      stopIncomingRing.current = null;
+      navigator.vibrate?.(0);
+    }
+    return () => { stopIncomingRing.current?.(); };
+  }, [incomingCall]);
+
+  // ── Outgoing call ring ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (callingState) {
+      stopOutgoingRing.current = startRinging(3000, ringOutgoing);
+    } else {
+      stopOutgoingRing.current?.();
+      stopOutgoingRing.current = null;
+    }
+    return () => { stopOutgoingRing.current?.(); };
+  }, [callingState]);
 
   useEffect(() => {
     const onRequest = (e: any) => setConnRequest(e.detail);
@@ -86,7 +195,6 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
-  // Mark read and auto-close sidebar on mobile when chat opens
   useEffect(() => {
     if (activeChat) {
       markRead(activeChat);
@@ -101,6 +209,7 @@ export default function App() {
 
   const handleSelectChat = useCallback((pid: string) => {
     setActiveChat(pid);
+    setToasts(prev => prev.filter(t => t.pid !== pid));
     window.history.pushState({ chat: pid }, '', `?chat=${pid}`);
   }, []);
 
@@ -114,23 +223,44 @@ export default function App() {
 
   const handleCall = async (kind: 'audio' | 'video' | 'screen') => {
     if (!activeChat) return;
+    const fname = peers[activeChat]?.friendlyName || activeChat;
     try {
-      const { call, stream } = await startCall(activeChat, kind);
+      const { call, stream, cameraStream } = await startCall(activeChat, kind);
+      setCallingState({ fname, kind, call, stream, cameraStream });
+
       call.on('stream', (remoteStream: MediaStream) => {
+        stopOutgoingRing.current?.();
+        setCallingState(null);
         setActiveCall({
           stream: remoteStream,
           localStream: kind === 'screen' ? undefined : stream,
-          fname: peers[activeChat]?.friendlyName || activeChat,
+          cameraStream: kind === 'screen' ? cameraStream : undefined,
+          fname,
           kind,
           call,
         });
       });
       call.on('close', () => {
+        setCallingState(null);
         setActiveCall(null);
         stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+        cameraStream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
       });
-    } catch (e) {
-      console.error('Call failed', e);
+    } catch (e: any) {
+      setCallingState(null);
+      if (e?.message) {
+        // Surface the error visually — for now use the log panel (already shown at bottom)
+        console.error('Call failed:', e.message);
+      }
+    }
+  };
+
+  const cancelCall = () => {
+    if (callingState) {
+      callingState.call.close();
+      callingState.stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+      callingState.cameraStream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+      setCallingState(null);
     }
   };
 
@@ -167,7 +297,8 @@ export default function App() {
   const endCall = () => {
     if (activeCall) {
       activeCall.call.close();
-      if (activeCall.localStream) activeCall.localStream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+      activeCall.localStream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
+      activeCall.cameraStream?.getTracks().forEach((t: MediaStreamTrack) => t.stop());
       setActiveCall(null);
     }
   };
@@ -223,6 +354,9 @@ export default function App() {
               onCall={handleCall}
               onBack={handleBack}
               onContactInfo={() => setContactModalPid(activeChat)}
+              onEditMessage={(id, content) => editMessage(activeChat, id, content)}
+              onDeleteMessage={(id) => deleteMessage(activeChat, id)}
+              onRetryMessage={(id) => retryMessage(activeChat, id)}
             />
           ) : (
             <div className="flex-1 flex items-center justify-center text-gray-600 flex-col gap-3">
@@ -233,7 +367,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Log panel — always visible at bottom */}
+      {/* Log panel */}
       <div className="shrink-0 h-24 border-t border-gray-800 bg-black overflow-y-auto">
         <div className="px-2 py-1 min-h-full">
           {logs.length === 0 ? (
@@ -256,9 +390,23 @@ export default function App() {
         </div>
       </div>
 
-      {/* Build badge — bottom right */}
+      {/* Build badge */}
       <div className="fixed bottom-2 right-2 z-[200] bg-gray-800 border border-gray-700 text-gray-500 text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none select-none">
         #{BUILD}
+      </div>
+
+      {/* Toast notifications */}
+      <div className="fixed bottom-28 left-2 z-[150] flex flex-col gap-2 pointer-events-none">
+        {toasts.map(toast => (
+          <div
+            key={toast.id}
+            onClick={() => { handleSelectChat(toast.pid); setToasts(prev => prev.filter(t => t.id !== toast.id)); }}
+            className="pointer-events-auto bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 shadow-xl max-w-[260px] cursor-pointer hover:bg-gray-700 transition-colors animate-in slide-in-from-left-2"
+          >
+            <div className="text-xs font-semibold text-gray-200 truncate">{toast.fname}</div>
+            <div className="text-[11px] text-gray-400 truncate mt-0.5">{toast.preview}</div>
+          </div>
+        ))}
       </div>
 
       {/* Contact detail modal */}
@@ -318,7 +466,7 @@ export default function App() {
       {incomingCall && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
           <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl w-80 shadow-2xl">
-            <h3 className="text-lg font-semibold text-gray-200 mb-2">Incoming Call</h3>
+            <h3 className="text-lg font-semibold text-gray-200 mb-1">Incoming Call</h3>
             <p className="text-gray-400 text-sm mb-6">
               <span className="text-white font-semibold">{incomingCall.fname}</span> is calling ({incomingCall.kind}).
             </p>
@@ -330,10 +478,19 @@ export default function App() {
         </div>
       )}
 
+      {callingState && (
+        <CallingOverlay
+          fname={callingState.fname}
+          kind={callingState.kind}
+          onCancel={cancelCall}
+        />
+      )}
+
       {activeCall && (
         <MediaOverlay
           stream={activeCall.stream}
           localStream={activeCall.localStream}
+          cameraStream={activeCall.cameraStream}
           fname={activeCall.fname}
           kind={activeCall.kind}
           onEnd={endCall}

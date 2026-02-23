@@ -36,7 +36,10 @@ export interface ChatMessage {
   tid?: string;
   size?: number;
   ts: number;
-  status?: 'waiting' | 'sent' | 'delivered';
+  status?: 'waiting' | 'sent' | 'delivered' | 'failed';
+  edited?: boolean;
+  deleted?: boolean;
+  retries?: number;
 }
 
 export interface FileTransfer {

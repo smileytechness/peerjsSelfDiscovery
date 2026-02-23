@@ -59,6 +59,8 @@ export class P2PManager extends EventTarget {
   private heartbeatTimer: any = null;
   private namespaceMonitorTimer: any = null;
   private connectingPIDs: Set<string> = new Set();
+  private connectFailures: Record<string, number> = {};
+  private readonly MAX_CONNECT_RETRIES = 3;
   public offlineMode: boolean = false;
   public namespaceOffline: boolean = false;
   private readonly MAX_NAMESPACE = 5;
@@ -1071,7 +1073,38 @@ export class P2PManager extends EventTarget {
     conn.on('error', (err) => {
       this.connectingPIDs.delete(pid);
       this.log(`Persistent connection error with ${fname}: ${err.type}`, 'err');
+      // Don't retry if signaling is down — reconnectOfflineContacts fires when persPeer reopens
+      if (this.persPeer?.disconnected || this.offlineMode) return;
+      this.connectFailures[pid] = (this.connectFailures[pid] || 0) + 1;
+      if (this.connectFailures[pid] < this.MAX_CONNECT_RETRIES) {
+        const delay = 5000 * this.connectFailures[pid];
+        this.log(`Retry ${this.connectFailures[pid]}/${this.MAX_CONNECT_RETRIES} for ${fname} in ${delay / 1000}s`, 'info');
+        setTimeout(() => {
+          if (!this.contacts[pid]?.conn?.open && !this.connectingPIDs.has(pid)) {
+            this.connectPersistent(pid, fname);
+          }
+        }, delay);
+      } else {
+        this.log(`${fname} unreachable after ${this.MAX_CONNECT_RETRIES} attempts — marking messages failed`, 'err');
+        this.markWaitingMessagesFailed(pid);
+      }
     });
+  }
+
+  private markWaitingMessagesFailed(pid: string) {
+    const msgs = this.chats[pid];
+    if (!msgs) return;
+    let changed = false;
+    msgs.forEach(m => {
+      if (m.dir === 'sent' && m.status === 'waiting') {
+        m.status = 'failed';
+        changed = true;
+      }
+    });
+    if (changed) {
+      saveChats(this.chats);
+      this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+    }
   }
 
   private async handlePersistentData(d: any, conn: DataConnection) {
@@ -1131,6 +1164,8 @@ export class P2PManager extends EventTarget {
           signature
         });
       }
+      // Reset failure counter — contact is reachable again
+      delete this.connectFailures[pid];
       saveContacts(this.contacts);
       this.emitPeerListUpdate();
       this.log(`Hello from ${d.friendlyname}`, 'ok');
@@ -1151,6 +1186,32 @@ export class P2PManager extends EventTarget {
         const msg = msgs.find(m => m.id === d.id && m.dir === 'sent');
         if (msg) {
           msg.status = 'delivered';
+          saveChats(this.chats);
+          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+        }
+      }
+    }
+
+    if (d.type === 'message-edit') {
+      const msgs = this.chats[pid];
+      if (msgs) {
+        const msg = msgs.find(m => m.id === d.id);
+        if (msg && !msg.deleted) {
+          msg.content = d.content;
+          msg.edited = true;
+          saveChats(this.chats);
+          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+        }
+      }
+    }
+
+    if (d.type === 'message-delete') {
+      const msgs = this.chats[pid];
+      if (msgs) {
+        const msg = msgs.find(m => m.id === d.id);
+        if (msg) {
+          msg.content = '';
+          msg.deleted = true;
           saveChats(this.chats);
           this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
         }
@@ -1226,6 +1287,45 @@ export class P2PManager extends EventTarget {
   }
 
   // ─── Public API ───────────────────────────────────────────────────────────
+
+  public editMessage(pid: string, id: string, content: string) {
+    const msgs = this.chats[pid];
+    if (!msgs) return;
+    const msg = msgs.find(m => m.id === id && m.dir === 'sent');
+    if (!msg || msg.deleted) return;
+    msg.content = content;
+    msg.edited = true;
+    saveChats(this.chats);
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+    const conn = this.contacts[pid]?.conn;
+    if (conn?.open) conn.send({ type: 'message-edit', id, content });
+  }
+
+  public deleteMessage(pid: string, id: string) {
+    const msgs = this.chats[pid];
+    if (!msgs) return;
+    const msg = msgs.find(m => m.id === id && m.dir === 'sent');
+    if (!msg) return;
+    msg.content = '';
+    msg.deleted = true;
+    saveChats(this.chats);
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+    const conn = this.contacts[pid]?.conn;
+    if (conn?.open) conn.send({ type: 'message-delete', id });
+  }
+
+  public retryMessage(pid: string, id: string) {
+    const msgs = this.chats[pid];
+    if (!msgs) return;
+    const msg = msgs.find(m => m.id === id && m.dir === 'sent' && m.status === 'failed');
+    if (!msg) return;
+    msg.status = 'waiting';
+    delete this.connectFailures[pid];
+    saveChats(this.chats);
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+    const c = this.contacts[pid];
+    if (c) this.connectPersistent(pid, c.friendlyName);
+  }
 
   public deleteContact(pid: string) {
     const c = this.contacts[pid];
@@ -1347,13 +1447,35 @@ export class P2PManager extends EventTarget {
 
   public async startCall(pid: string, kind: 'audio' | 'video' | 'screen') {
     if (!this.persPeer) throw new Error('Not initialized');
+
+    // Android Chrome does not support getDisplayMedia
+    if (kind === 'screen' && !navigator.mediaDevices?.getDisplayMedia) {
+      const err = new Error('Screen sharing is not supported on this browser. On Android, use a desktop browser.');
+      this.log(err.message, 'err');
+      throw err;
+    }
+
     try {
-      const stream = kind === 'screen'
-        ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
-        : await navigator.mediaDevices.getUserMedia(kind === 'audio' ? { audio: true } : { audio: true, video: true });
+      let stream: MediaStream;
+      let cameraStream: MediaStream | undefined;
+
+      if (kind === 'screen') {
+        // Capture screen + system audio
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        // Also capture camera for PiP corner display (non-blocking — ignore if denied)
+        try {
+          cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        } catch {
+          // Camera PiP optional — proceed without it
+        }
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia(
+          kind === 'audio' ? { audio: true } : { audio: true, video: true }
+        );
+      }
 
       const call = this.persPeer.call(pid, stream, { metadata: { kind } });
-      return { call, stream };
+      return { call, stream, cameraStream };
     } catch (e: any) {
       this.log(`Call failed: ${e.message}`, 'err');
       throw e;
