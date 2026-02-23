@@ -58,6 +58,7 @@ export class P2PManager extends EventTarget {
   private namespaceMonitorTimer: any = null;
   private connectingPIDs: Set<string> = new Set();
   public offlineMode: boolean = false;
+  public namespaceOffline: boolean = false;
   private readonly MAX_NAMESPACE = 5;
   private readonly MAX_JOIN_ATTEMPTS = 3;
   private incomingFiles: Record<string, FileTransfer> = {};
@@ -316,15 +317,41 @@ export class P2PManager extends EventTarget {
 
   public setOfflineMode(offline: boolean) {
     this.offlineMode = offline;
-    this.log(offline ? 'Offline mode — signaling paused' : 'Going online...', 'info');
+    this.log(offline ? 'Offline mode — all connections paused' : 'Going online...', 'info');
     if (offline) {
+      // Kill namespace discovery too
+      this.setNamespaceOffline(true);
       if (this.persPeer && !this.persPeer.destroyed && !this.persPeer.disconnected) {
         try { this.persPeer.disconnect(); } catch {}
       }
       this.persConnected = false;
       this.emitStatus();
     } else {
+      this.namespaceOffline = false; // re-enable namespace when going online
       this.handleOnline();
+    }
+  }
+
+  public setNamespaceOffline(offline: boolean) {
+    this.namespaceOffline = offline;
+    if (offline) {
+      this.clearNamespaceMonitor();
+      if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+      if (this.routerPeer) { this.routerPeer.destroy(); this.routerPeer = null; }
+      if (this.discPeer) { this.discPeer.destroy(); this.discPeer = null; }
+      if (this.routerConn) { this.routerConn.close(); this.routerConn = null; }
+      this.isRouter = false;
+      this.namespaceLevel = 0;
+      const myEntry = Object.values(this.registry).find(r => r.isMe);
+      this.registry = myEntry ? { [myEntry.discoveryID]: myEntry } : {};
+      this.emitPeerListUpdate();
+      this.emitStatus();
+      this.log('Namespace discovery paused', 'info');
+    } else {
+      if (this.publicIP) {
+        this.log('Rejoining namespace...', 'info');
+        this.attemptNamespace(1);
+      }
     }
   }
 
@@ -389,7 +416,7 @@ export class P2PManager extends EventTarget {
       }
     }
     // Re-join discovery if needed
-    if (this.publicIP && !this.isRouter && (!this.routerConn || !this.routerConn.open)) {
+    if (this.publicIP && !this.namespaceOffline && !this.isRouter && (!this.routerConn || !this.routerConn.open)) {
       setTimeout(() => this.tryJoinNamespace(this.namespaceLevel || 1), 1500);
     }
   }
@@ -428,6 +455,7 @@ export class P2PManager extends EventTarget {
   // ─── Namespace cascade ────────────────────────────────────────────────────
 
   private attemptNamespace(level: number) {
+    if (this.namespaceOffline) return;
     if (level > this.MAX_NAMESPACE) {
       this.log(`All namespace levels exhausted (1–${this.MAX_NAMESPACE}) — discovery offline`, 'err');
       return;
@@ -785,6 +813,7 @@ export class P2PManager extends EventTarget {
   // ─── Failover ─────────────────────────────────────────────────────────────
 
   private failover() {
+    if (this.namespaceOffline) return;
     const jitter = Math.random() * 3000;
     this.log(`Failover in ${(jitter / 1000).toFixed(1)}s — restarting from L1`, 'info');
     this.clearNamespaceMonitor();

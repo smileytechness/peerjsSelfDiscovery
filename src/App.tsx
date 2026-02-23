@@ -20,6 +20,7 @@ export default function App() {
     logs,
     unreadCounts,
     offlineMode,
+    namespaceOffline,
     markRead,
     init,
     connect,
@@ -29,6 +30,7 @@ export default function App() {
     pingContact,
     deleteContact,
     setOfflineMode,
+    setNamespaceOffline,
   } = useP2P();
 
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -189,6 +191,8 @@ export default function App() {
           networkIP={status.ip}
           networkDiscID={status.did}
           namespaceLevel={status.namespaceLevel}
+          namespaceOffline={namespaceOffline}
+          onToggleNamespace={() => setNamespaceOffline(!namespaceOffline)}
           peers={peers}
           registry={registry}
           chats={chats}

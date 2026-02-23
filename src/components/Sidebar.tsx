@@ -18,6 +18,8 @@ interface SidebarProps {
   networkIP: string;
   networkDiscID: string;
   namespaceLevel: number;
+  namespaceOffline: boolean;
+  onToggleNamespace: () => void;
   // Contacts / chats
   peers: Record<string, Contact>;
   registry: Record<string, PeerInfo>;
@@ -58,6 +60,8 @@ export function Sidebar({
   networkIP,
   networkDiscID,
   namespaceLevel,
+  namespaceOffline,
+  onToggleNamespace,
   peers,
   registry,
   chats,
@@ -127,10 +131,10 @@ export function Sidebar({
           {installPrompt && (
             <button
               onClick={() => { installPrompt.prompt(); setInstallPrompt(null); }}
-              className="p-1 hover:bg-gray-800 rounded text-blue-400 hover:text-blue-300 shrink-0"
-              title="Install app"
+              className="flex items-center gap-1 text-[10px] text-blue-400 hover:text-blue-300 px-1.5 py-0.5 hover:bg-blue-900/20 rounded transition-colors shrink-0"
+              title="Install as app"
             >
-              <Download size={14} />
+              <Download size={11} /> Install
             </button>
           )}
           <button
@@ -170,15 +174,28 @@ export function Sidebar({
             <div className="px-3 pb-3 space-y-2">
               {/* Public IP namespace card */}
               {networkIP ? (
-                <div className="bg-gray-800 rounded-lg p-2.5 text-[11px]">
+                <div className={clsx('bg-gray-800 rounded-lg p-2.5 text-[11px]', namespaceOffline && 'opacity-50')}>
                   <div className="flex items-center justify-between mb-1.5">
                     <span className="text-gray-300 font-medium">🌐 Public IP</span>
-                    <span className={clsx(
-                      'text-[10px] font-mono px-1 py-0.5 rounded border',
-                      isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
-                    )}>
-                      {namespaceLevel > 0 ? (isRouter ? `Router L${namespaceLevel}` : `Peer L${namespaceLevel}`) : '…'}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={onToggleNamespace}
+                        className={clsx(
+                          'p-0.5 rounded transition-colors',
+                          namespaceOffline ? 'text-orange-400' : 'text-gray-500 hover:text-gray-300'
+                        )}
+                        title={namespaceOffline ? 'Namespace paused — click to rejoin' : 'Pause this namespace'}
+                      >
+                        {namespaceOffline ? <WifiOff size={11} /> : <Wifi size={11} />}
+                      </button>
+                      <span className={clsx(
+                        'text-[10px] font-mono px-1 py-0.5 rounded border',
+                        namespaceOffline ? 'text-orange-400 border-orange-800' :
+                        isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
+                      )}>
+                        {namespaceOffline ? 'Paused' : namespaceLevel > 0 ? (isRouter ? `Router L${namespaceLevel}` : `Peer L${namespaceLevel}`) : '…'}
+                      </span>
+                    </div>
                   </div>
                   <div className="space-y-1 text-[10px]">
                     <div className="flex justify-between">
