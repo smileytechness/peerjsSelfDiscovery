@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Contact, PeerInfo, ChatMessage } from '../lib/types';
 import { extractDiscUUID } from '../lib/discovery';
 import { clsx } from 'clsx';
-import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio } from 'lucide-react';
+import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio, Pencil } from 'lucide-react';
 
 interface SidebarProps {
   // My identity (shown in header)
@@ -37,6 +37,7 @@ interface SidebarProps {
   onConnect: (did: string, fname: string) => void;
   onAddContact: () => void;
   onShowContactInfo: (pid: string) => void;
+  onShowProfile: () => void;
 }
 
 function formatTimeSince(ts: number): string {
@@ -92,6 +93,7 @@ export function Sidebar({
   onConnect,
   onAddContact,
   onShowContactInfo,
+  onShowProfile,
 }: SidebarProps) {
   const savedPIDs = Object.keys(peers);
   const unknownOnNet = Object.keys(registry).filter((did) => !registry[did].isMe && !registry[did].knownPID);
@@ -134,7 +136,14 @@ export function Sidebar({
             className={clsx('w-2 h-2 rounded-full shrink-0', persConnected ? 'bg-green-500' : 'bg-gray-600')}
             title={persConnected ? 'Reachable (persistent ID registered)' : 'Signaling disconnected'}
           />
-          <span className="font-semibold text-gray-100 text-sm flex-1 truncate">{myName || '—'}</span>
+          <button
+            onClick={onShowProfile}
+            className="flex items-center gap-1.5 flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
+            title="View profile & settings"
+          >
+            <span className="font-semibold text-gray-100 text-sm truncate">{myName || '—'}</span>
+            <Pencil size={11} className="text-gray-500 shrink-0" />
+          </button>
           <button
             onClick={onToggleOffline}
             className={clsx(

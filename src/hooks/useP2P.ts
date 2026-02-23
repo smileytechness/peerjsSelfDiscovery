@@ -97,6 +97,7 @@ export function useP2P() {
   const editMessage = useCallback((pid: string, id: string, content: string) => p2p.editMessage(pid, id, content), []);
   const deleteMessage = useCallback((pid: string, id: string) => p2p.deleteMessage(pid, id), []);
   const retryMessage = useCallback((pid: string, id: string) => p2p.retryMessage(pid, id), []);
+  const updateName = useCallback((name: string) => p2p.updateFriendlyName(name), []);
   const setOfflineMode = useCallback((offline: boolean) => {
     p2p.setOfflineMode(offline);
     setOfflineModeState(offline);
@@ -128,6 +129,7 @@ export function useP2P() {
     editMessage,
     deleteMessage,
     retryMessage,
+    updateName,
     setOfflineMode,
     setNamespaceOffline,
     p2p,

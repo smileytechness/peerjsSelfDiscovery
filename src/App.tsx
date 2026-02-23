@@ -9,6 +9,7 @@ import { ConnectModal } from './components/ConnectModal';
 import { MediaOverlay } from './components/MediaOverlay';
 import { CallingOverlay } from './components/CallingOverlay';
 import { NamespaceModal } from './components/NamespaceModal';
+import { ProfileModal } from './components/ProfileModal';
 import { p2p } from './lib/p2p';
 import { BUILD } from './lib/version';
 import { clsx } from 'clsx';
@@ -58,6 +59,13 @@ function playMessagePing() {
   playTone(ctx, 1047, 0.12, 0.15); // C6, soft
 }
 
+function playRequestChime() {
+  const ctx = getAudioCtx();
+  playTone(ctx, 523, 0.15, 0.25);  // C5
+  setTimeout(() => playTone(ctx, 659, 0.15, 0.25), 180);  // E5
+  setTimeout(() => playTone(ctx, 784, 0.25, 0.35), 360);  // G5
+}
+
 // ── Toast types ───────────────────────────────────────────────────────────────
 
 interface Toast {
@@ -90,6 +98,7 @@ export default function App() {
     editMessage,
     deleteMessage,
     retryMessage,
+    updateName,
     setOfflineMode,
     setNamespaceOffline,
   } = useP2P();
@@ -97,13 +106,17 @@ export default function App() {
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showShare, setShowShare] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showNamespaceInfo, setShowNamespaceInfo] = useState(false);
   const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const [connRequest, setConnRequest] = useState<{ fname: string; accept: () => void; reject: () => void } | null>(null);
+  const [connRequest, setConnRequest] = useState<{ fname: string; publicKey?: string; fingerprint?: string; verified?: boolean; accept: () => void; reject: () => void } | null>(null);
+  const [pendingConnectPID] = useState<string | null>(() => {
+    try { return new URL(window.location.href).searchParams.get('connect'); } catch { return null; }
+  });
   const [incomingCall, setIncomingCall] = useState<{ call: any; fname: string; kind: string } | null>(null);
   const [callingState, setCallingState] = useState<{ fname: string; kind: 'audio' | 'video' | 'screen'; call: any; stream: MediaStream; cameraStream?: MediaStream } | null>(null);
   const [activeCall, setActiveCall] = useState<{ stream: MediaStream; localStream?: MediaStream; cameraStream?: MediaStream; fname: string; kind: string; call: any } | null>(null);
@@ -161,6 +174,14 @@ export default function App() {
     return () => { stopOutgoingRing.current?.(); };
   }, [callingState]);
 
+  // ── Incoming connection request sound ──────────────────────────────────────
+  useEffect(() => {
+    if (connRequest) {
+      playRequestChime();
+      navigator.vibrate?.([200, 100, 200]);
+    }
+  }, [connRequest]);
+
   useEffect(() => {
     const onRequest = (e: any) => setConnRequest(e.detail);
     const onIncomingCall = (e: any) => setIncomingCall(e.detail);
@@ -179,6 +200,18 @@ export default function App() {
       init(name);
     }
   }, [init]);
+
+  // Auto-connect from share link (?connect=PID)
+  useEffect(() => {
+    if (!pendingConnectPID || setupNeeded || !status.pid) return;
+    if (peers[pendingConnectPID]) return; // already a contact
+    if (pendingConnectPID === status.pid) return; // self
+    connect(pendingConnectPID, 'Unknown');
+    // Clean up the URL
+    const url = new URL(window.location.href);
+    url.searchParams.delete('connect');
+    window.history.replaceState({}, '', url.toString());
+  }, [pendingConnectPID, setupNeeded, status.pid, peers, connect]);
 
   // Browser back button support
   useEffect(() => {
@@ -341,6 +374,7 @@ export default function App() {
           onConnect={(did, fname) => connect(did, fname)}
           onAddContact={() => setShowConnect(true)}
           onShowContactInfo={(pid) => setContactModalPid(pid)}
+          onShowProfile={() => setShowProfile(true)}
         />
 
         <div className={clsx('flex-1 flex flex-col min-w-0', !activeChat && sidebarOpen ? 'hidden md:flex' : 'flex')}>
@@ -423,6 +457,21 @@ export default function App() {
 
       {showShare && <ShareModal pid={status.pid} onClose={() => setShowShare(false)} />}
 
+      {showProfile && (
+        <ProfileModal
+          name={localStorage.getItem('myapp-name') || status.pid}
+          pid={status.pid}
+          publicKey={p2p.publicKeyStr}
+          fingerprint={status.pubkeyFingerprint}
+          signalingState={status.signalingState}
+          lastSignalingTs={status.lastSignalingTs}
+          persConnected={status.persConnected}
+          signalingServer={p2p.signalingServer}
+          onEditName={updateName}
+          onClose={() => setShowProfile(false)}
+        />
+      )}
+
       {showNamespaceInfo && (
         <NamespaceModal
           role={status.role}
@@ -443,12 +492,31 @@ export default function App() {
       )}
 
       {connRequest && (
-        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-          <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl w-80 shadow-2xl">
-            <h3 className="text-lg font-semibold text-gray-200 mb-2">Connection Request</h3>
-            <p className="text-gray-400 text-sm mb-6">
-              <span className="text-white font-semibold">{connRequest.fname}</span> wants to connect.
-            </p>
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-900 border border-gray-800 p-5 rounded-xl w-full max-w-sm shadow-2xl">
+            <h3 className="text-base font-semibold text-gray-200 mb-3">Incoming Connection Request</h3>
+            <div className="mb-4">
+              <div className="text-white font-bold text-lg">{connRequest.fname}</div>
+              <div className="text-gray-400 text-sm">wants to connect with you</div>
+            </div>
+            {/* Public key / verification */}
+            <div className={`rounded-lg px-3 py-2 mb-4 text-xs ${connRequest.publicKey ? (connRequest.verified ? 'bg-green-900/30 border border-green-800/50' : 'bg-red-900/30 border border-red-800/50') : 'bg-gray-800 border border-gray-700'}`}>
+              {connRequest.publicKey ? (
+                <>
+                  <div className={`font-semibold mb-1 ${connRequest.verified ? 'text-green-400' : 'text-red-400'}`}>
+                    {connRequest.verified ? '✓ Identity Verified' : '⚠ Verification Failed'}
+                  </div>
+                  {connRequest.fingerprint && (
+                    <div className="font-mono text-purple-300 text-[10px] break-all">{connRequest.fingerprint}</div>
+                  )}
+                  {!connRequest.verified && (
+                    <div className="text-red-300 mt-1">The signature on this request is invalid. Proceed with caution.</div>
+                  )}
+                </>
+              ) : (
+                <div className="text-gray-400">No public key provided — identity unverified</div>
+              )}
+            </div>
             <div className="flex gap-3">
               <button
                 onClick={() => { connRequest.accept(); setConnRequest(null); }}

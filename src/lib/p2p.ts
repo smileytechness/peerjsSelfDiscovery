@@ -70,7 +70,8 @@ export class P2PManager extends EventTarget {
 
   private privateKey: CryptoKey | null = null;
   private publicKey: CryptoKey | null = null;
-  private publicKeyStr: string = '';
+  public publicKeyStr: string = '';
+  public readonly signalingServer = '0.peerjs.com';
 
   private initPromise: Promise<void> | null = null;
 
@@ -921,9 +922,11 @@ export class P2PManager extends EventTarget {
     }
 
     const conn = peer.connect(targetID, { reliable: true });
-    conn.on('open', () => {
+    conn.on('open', async () => {
       this.log(`Handshake channel open with ${targetID}`, 'info');
-      conn.send({ type: 'request', friendlyname: this.friendlyName });
+      const ts = String(Date.now());
+      const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
+      conn.send({ type: 'request', friendlyname: this.friendlyName, publicKey: this.publicKeyStr, ts, signature });
     });
 
     conn.on('data', (d: any) => {
@@ -933,7 +936,8 @@ export class P2PManager extends EventTarget {
           type: 'confirm',
           persistentID: this.persistentID,
           friendlyname: this.friendlyName,
-          discoveryUUID: this.discoveryUUID
+          discoveryUUID: this.discoveryUUID,
+          publicKey: this.publicKeyStr,
         });
 
         // Dedup: if this public key already exists under a different PID, migrate
@@ -974,10 +978,24 @@ export class P2PManager extends EventTarget {
   private async handleHandshakeData(d: any, conn: DataConnection) {
     if (d.type === 'request') {
       const fname = d.friendlyname;
-      this.log(`Incoming connection request from ${fname}`, 'info');
+      let verified = false;
+      let fingerprint = '';
+      if (d.publicKey && d.ts && d.signature && window.crypto?.subtle) {
+        try {
+          const key = await importPublicKey(d.publicKey);
+          verified = await verifySignature(key, d.signature, d.ts);
+          const bytes = new TextEncoder().encode(d.publicKey);
+          const hash = await crypto.subtle.digest('SHA-256', bytes);
+          fingerprint = Array.from(new Uint8Array(hash)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
+        } catch {}
+      }
+      this.log(`Incoming connection request from ${fname}${verified ? ' (verified)' : ''}`, 'info');
       const event = new CustomEvent('connection-request', {
         detail: {
           fname,
+          publicKey: d.publicKey || null,
+          fingerprint,
+          verified,
           accept: () => {
             conn.send({ type: 'accepted', persistentID: this.persistentID, discoveryUUID: this.discoveryUUID });
             this.log(`Accepted request from ${fname}`, 'ok');
@@ -1259,6 +1277,15 @@ export class P2PManager extends EventTarget {
         }
       }
     }
+
+    if (d.type === 'name-update' && d.name) {
+      if (this.contacts[pid]) {
+        this.contacts[pid].friendlyName = d.name;
+        saveContacts(this.contacts);
+        this.emitPeerListUpdate();
+        this.log(`${d.name} updated their name`, 'info');
+      }
+    }
   }
 
   private flushMessageQueue(pid: string) {
@@ -1325,6 +1352,24 @@ export class P2PManager extends EventTarget {
     this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
     const c = this.contacts[pid];
     if (c) this.connectPersistent(pid, c.friendlyName);
+  }
+
+  public updateFriendlyName(name: string) {
+    this.friendlyName = name;
+    localStorage.setItem('myapp-name', name);
+    // Broadcast to all open connections
+    Object.values(this.contacts).forEach(c => {
+      if (c.conn?.open) c.conn.send({ type: 'name-update', name });
+    });
+    // Re-checkin to namespace router so the registry reflects the new name
+    if (this.routerConn?.open) {
+      this.routerConn.send({ type: 'checkin', discoveryID: this.discoveryID, friendlyname: name, publicKey: this.publicKeyStr });
+    }
+    if (this.registry[this.discoveryID]) this.registry[this.discoveryID].friendlyName = name;
+    if (this.isRouter) this.broadcastRegistry();
+    this.emitPeerListUpdate();
+    this.emitStatus();
+    this.log(`Name updated to: ${name}`, 'ok');
   }
 
   public deleteContact(pid: string) {
