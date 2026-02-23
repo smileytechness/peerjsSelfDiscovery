@@ -1,8 +1,8 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Contact, PeerInfo, ChatMessage } from '../lib/types';
 import { extractDiscUUID } from '../lib/discovery';
 import { clsx } from 'clsx';
-import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus } from 'lucide-react';
+import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download } from 'lucide-react';
 
 interface SidebarProps {
   // My identity (shown in header)
@@ -10,7 +10,9 @@ interface SidebarProps {
   myPid: string;
   myFingerprint: string;
   persConnected: boolean;
+  offlineMode: boolean;
   onShare: () => void;
+  onToggleOffline: () => void;
   // Network / discovery
   networkRole: string;
   networkIP: string;
@@ -49,7 +51,9 @@ export function Sidebar({
   myPid,
   myFingerprint,
   persConnected,
+  offlineMode,
   onShare,
+  onToggleOffline,
   networkRole,
   networkIP,
   networkDiscID,
@@ -71,6 +75,13 @@ export function Sidebar({
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
   const [nsExpanded, setNsExpanded] = useState(true);
+  const [installPrompt, setInstallPrompt] = useState<any>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => { e.preventDefault(); setInstallPrompt(e); };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
 
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressTarget = useRef<string | null>(null);
@@ -102,6 +113,27 @@ export function Sidebar({
           />
           <span className="font-semibold text-gray-100 text-sm flex-1 truncate">{myName || '—'}</span>
           <button
+            onClick={onToggleOffline}
+            className={clsx(
+              'p-1 rounded shrink-0 transition-colors',
+              offlineMode
+                ? 'text-orange-400 bg-orange-900/30 hover:bg-orange-900/50'
+                : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+            )}
+            title={offlineMode ? 'Offline mode — click to reconnect' : 'Go offline (pause signaling)'}
+          >
+            {offlineMode ? <WifiOff size={14} /> : <Wifi size={14} />}
+          </button>
+          {installPrompt && (
+            <button
+              onClick={() => { installPrompt.prompt(); setInstallPrompt(null); }}
+              className="p-1 hover:bg-gray-800 rounded text-blue-400 hover:text-blue-300 shrink-0"
+              title="Install app"
+            >
+              <Download size={14} />
+            </button>
+          )}
+          <button
             onClick={onShare}
             className="p-1 hover:bg-gray-800 rounded text-gray-400 hover:text-white shrink-0"
             title="Share your Persistent ID"
@@ -127,7 +159,7 @@ export function Sidebar({
         {/* ── Discovery Namespaces ── */}
         <div className="border-b border-gray-800">
           <button
-            onClick={() => setNsExpanded(v => !v)}
+            onClick={() => setNsExpanded((v: boolean) => !v)}
             className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-gray-500 uppercase tracking-wider hover:bg-gray-800/50 transition-colors"
           >
             <span>📡 Discovery Namespaces</span>

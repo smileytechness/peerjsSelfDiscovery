@@ -19,6 +19,7 @@ export default function App() {
     chats,
     logs,
     unreadCounts,
+    offlineMode,
     markRead,
     init,
     connect,
@@ -27,6 +28,7 @@ export default function App() {
     startCall,
     pingContact,
     deleteContact,
+    setOfflineMode,
   } = useP2P();
 
   const [activeChat, setActiveChat] = useState<string | null>(null);
@@ -180,7 +182,9 @@ export default function App() {
           myPid={status.pid}
           myFingerprint={status.pubkeyFingerprint}
           persConnected={status.persConnected}
+          offlineMode={offlineMode}
           onShare={() => setShowShare(true)}
+          onToggleOffline={() => setOfflineMode(!offlineMode)}
           networkRole={status.role}
           networkIP={status.ip}
           networkDiscID={status.did}

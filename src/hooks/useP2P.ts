@@ -17,6 +17,7 @@ export function useP2P() {
   const [registry, setRegistry] = useState<Record<string, PeerInfo>>({});
   const [chats, setChats] = useState<Record<string, ChatMessage[]>>({});
   const [logs, setLogs] = useState<{ msg: string; type: string; ts: number }[]>([]);
+  const [offlineMode, setOfflineModeState] = useState(false);
   const [lastRead, setLastRead] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('myapp-lastread') || '{}'); } catch { return {}; }
   });
@@ -86,6 +87,10 @@ export function useP2P() {
   const startCall = useCallback((pid: string, kind: 'audio' | 'video' | 'screen') => p2p.startCall(pid, kind), []);
   const pingContact = useCallback((pid: string) => p2p.pingContact(pid), []);
   const deleteContact = useCallback((pid: string) => p2p.deleteContact(pid), []);
+  const setOfflineMode = useCallback((offline: boolean) => {
+    p2p.setOfflineMode(offline);
+    setOfflineModeState(offline);
+  }, []);
 
   return {
     status,
@@ -94,6 +99,7 @@ export function useP2P() {
     chats,
     logs,
     unreadCounts,
+    offlineMode,
     markRead,
     init,
     connect,
@@ -102,6 +108,7 @@ export function useP2P() {
     startCall,
     pingContact,
     deleteContact,
+    setOfflineMode,
     p2p,
   };
 }

@@ -57,6 +57,7 @@ export class P2PManager extends EventTarget {
   private heartbeatTimer: any = null;
   private namespaceMonitorTimer: any = null;
   private connectingPIDs: Set<string> = new Set();
+  public offlineMode: boolean = false;
   private readonly MAX_NAMESPACE = 5;
   private readonly MAX_JOIN_ATTEMPTS = 3;
   private incomingFiles: Record<string, FileTransfer> = {};
@@ -313,7 +314,46 @@ export class P2PManager extends EventTarget {
 
   private reconnectBackoff = 0;
 
+  public setOfflineMode(offline: boolean) {
+    this.offlineMode = offline;
+    this.log(offline ? 'Offline mode — signaling paused' : 'Going online...', 'info');
+    if (offline) {
+      if (this.persPeer && !this.persPeer.destroyed && !this.persPeer.disconnected) {
+        try { this.persPeer.disconnect(); } catch {}
+      }
+      this.persConnected = false;
+      this.emitStatus();
+    } else {
+      this.handleOnline();
+    }
+  }
+
+  // Returns the PID of an existing contact with the given public key (excluding `excludePID`)
+  private findContactByPublicKey(publicKey: string, excludePID?: string): string | null {
+    return Object.keys(this.contacts).find(
+      k => k !== excludePID && !!this.contacts[k].publicKey && this.contacts[k].publicKey === publicKey
+    ) ?? null;
+  }
+
+  // Merges an old contact entry into a new PID when a device gets a new persistent ID
+  private migrateContact(oldPID: string, newPID: string) {
+    if (oldPID === newPID) return;
+    const existing = this.contacts[oldPID];
+    if (!this.contacts[newPID]) {
+      this.contacts[newPID] = { ...existing, conn: null };
+    }
+    if (this.chats[oldPID] && !this.chats[newPID]) {
+      this.chats[newPID] = this.chats[oldPID];
+      delete this.chats[oldPID];
+    }
+    delete this.contacts[oldPID];
+    saveContacts(this.contacts);
+    saveChats(this.chats);
+    this.log(`Contact migrated: ${oldPID.slice(-8)} → ${newPID.slice(-8)}`, 'info');
+  }
+
   private schedulePersReconnect() {
+    if (this.offlineMode) return;
     const delay = Math.min(1000 * Math.pow(2, this.reconnectBackoff), 30000) + Math.random() * 1000;
     this.reconnectBackoff = Math.min(this.reconnectBackoff + 1, 5);
     setTimeout(() => {
@@ -333,6 +373,7 @@ export class P2PManager extends EventTarget {
   }
 
   private handleOnline() {
+    if (this.offlineMode) return;
     this.log('Connectivity change — checking persistent peer...', 'info');
     if (!this.persPeer || this.persPeer.destroyed) {
       this.persPeer = null;
@@ -371,6 +412,7 @@ export class P2PManager extends EventTarget {
   private startHeartbeat() {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => {
+      if (this.offlineMode) return;
       const connected = this.persPeer != null && !this.persPeer.destroyed && !this.persPeer.disconnected;
       if (connected !== this.persConnected) {
         this.persConnected = connected;
@@ -792,7 +834,12 @@ export class P2PManager extends EventTarget {
           discoveryUUID: this.discoveryUUID
         });
 
+        // Dedup: if this public key already exists under a different PID, migrate
+        const dupPID = d.publicKey ? this.findContactByPublicKey(d.publicKey, d.persistentID) : null;
+        if (dupPID) this.migrateContact(dupPID, d.persistentID);
+
         this.contacts[d.persistentID] = {
+          ...(this.contacts[d.persistentID] || {}),
           friendlyName: fname,
           discoveryID: isPersistent ? null : targetID,
           discoveryUUID: d.discoveryUUID,
@@ -844,7 +891,13 @@ export class P2PManager extends EventTarget {
     if (d.type === 'confirm') {
       const pid = d.persistentID;
       this.log(`Handshake confirmed by ${d.friendlyname} (${pid})`, 'ok');
+
+      // Dedup: if this public key already exists under a different PID, migrate
+      const dupPID = d.publicKey ? this.findContactByPublicKey(d.publicKey, pid) : null;
+      if (dupPID) this.migrateContact(dupPID, pid);
+
       this.contacts[pid] = {
+        ...(this.contacts[pid] || {}),
         friendlyName: d.friendlyname,
         discoveryID: null,
         discoveryUUID: d.discoveryUUID,
@@ -929,6 +982,12 @@ export class P2PManager extends EventTarget {
     }
 
     if (d.type === 'hello') {
+      // Dedup: same device got a new persistent ID — migrate old entry to new PID
+      if (d.publicKey) {
+        const dupPID = this.findContactByPublicKey(d.publicKey, pid);
+        if (dupPID) this.migrateContact(dupPID, pid);
+      }
+
       const isNew = !this.contacts[pid] || !this.contacts[pid].conn;
 
       if (d.publicKey && d.signature && d.ts) {
