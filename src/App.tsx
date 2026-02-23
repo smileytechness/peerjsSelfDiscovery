@@ -100,6 +100,10 @@ export default function App() {
     retryMessage,
     updateName,
     acceptIncoming,
+    joinCustomNS,
+    leaveCustomNS,
+    toggleCustomNSOffline,
+    customNamespaces,
     setOfflineMode,
     setNamespaceOffline,
   } = useP2P();
@@ -110,6 +114,7 @@ export default function App() {
   const [showProfile, setShowProfile] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showNamespaceInfo, setShowNamespaceInfo] = useState(false);
+  const [customNSInfoSlug, setCustomNSInfoSlug] = useState<string | null>(null);
   const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -378,6 +383,10 @@ export default function App() {
           onShowProfile={() => setShowProfile(true)}
           onAcceptIncoming={(pid) => acceptIncoming(pid)}
           onDismissPending={(pid) => { deleteContact(pid); if (activeChat === pid) setActiveChat(null); }}
+          customNamespaces={customNamespaces}
+          onJoinCustomNS={joinCustomNS}
+          onToggleCustomNSOffline={toggleCustomNSOffline}
+          onShowCustomNSInfo={(slug) => setCustomNSInfoSlug(slug)}
         />
 
         <div className={clsx('flex-1 flex flex-col min-w-0', !activeChat && sidebarOpen ? 'hidden md:flex' : 'flex')}>
@@ -486,6 +495,25 @@ export default function App() {
           onClose={() => setShowNamespaceInfo(false)}
         />
       )}
+
+      {customNSInfoSlug && customNamespaces[customNSInfoSlug] && (() => {
+        const ns = customNamespaces[customNSInfoSlug];
+        const myEntry = (Object.values(ns.registry) as any[]).find(r => r.isMe);
+        return (
+          <NamespaceModal
+            namespaceName={ns.name}
+            role={ns.isRouter ? `Router L${ns.level}` : `Peer L${ns.level}`}
+            ip={ns.slug}
+            routerEndpoint={`myapp-ns-${ns.slug}-${ns.level || 1}`}
+            discID={myEntry?.discoveryID || ''}
+            namespaceLevel={ns.level}
+            isRouter={ns.isRouter}
+            registry={ns.registry}
+            onLeave={() => leaveCustomNS(customNSInfoSlug)}
+            onClose={() => setCustomNSInfoSlug(null)}
+          />
+        );
+      })()}
 
       {showConnect && (
         <ConnectModal

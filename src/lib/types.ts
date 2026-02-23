@@ -30,6 +30,15 @@ export interface Contact {
   pendingVerified?: boolean;     // signature verified at request time
 }
 
+export interface CustomNS {
+  name: string;
+  slug: string;
+  isRouter: boolean;
+  level: number;
+  offline: boolean;
+  registry: Record<string, PeerInfo>;
+}
+
 export interface ChatMessage {
   id: string;
   dir: 'sent' | 'recv';

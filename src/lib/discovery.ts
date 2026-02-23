@@ -114,3 +114,16 @@ export function extractDiscUUID(did: string): string {
   const parts = did.split('-');
   return parts[parts.length - 1];
 }
+
+/** Sanitize any user string into a PeerJS-safe namespace slug */
+export function slugifyNamespace(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'default';
+}
+
+export function makeCustomRouterID(slug: string, level: number): string {
+  return `${APP_PREFIX}-ns-${slug}-${level}`;
+}
+
+export function makeCustomDiscID(slug: string, uuid: string): string {
+  return `${APP_PREFIX}-ns-${slug}-${uuid}`;
+}

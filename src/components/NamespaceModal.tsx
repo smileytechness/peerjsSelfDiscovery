@@ -1,6 +1,6 @@
 import React from 'react';
 import { X, Radio } from 'lucide-react';
-import { PeerInfo } from '../lib/types';
+import { PeerInfo, APP_PREFIX } from '../lib/types';
 import { TTL, PING_IV } from '../lib/types';
 import { clsx } from 'clsx';
 
@@ -12,6 +12,9 @@ interface NamespaceModalProps {
   isRouter: boolean;
   registry: Record<string, PeerInfo>;
   onClose: () => void;
+  namespaceName?: string;   // "Public IP" by default
+  routerEndpoint?: string;  // e.g. "myapp-ns-teamchat-1"
+  onLeave?: () => void;     // shown for custom namespaces
 }
 
 function formatAge(ts: number): string {
@@ -23,7 +26,7 @@ function formatAge(ts: number): string {
   return `${Math.floor(diff / 3600000)}h ago`;
 }
 
-export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, registry, onClose }: NamespaceModalProps) {
+export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, registry, onClose, namespaceName = 'Public IP', routerEndpoint, onLeave }: NamespaceModalProps) {
   const peers = Object.values(registry);
   const myEntry = peers.find(r => r.isMe);
   const others = peers.filter(r => !r.isMe);
@@ -61,8 +64,16 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
                 {namespaceLevel === 0 ? 'Not joined' : role}
               </span>
             </Row>
-            <Row label="Namespace (Public IP)">
-              <span className="font-mono text-[11px] text-gray-300">{ip || '—'}</span>
+            <Row label={`Namespace (${namespaceName})`}>
+              {ip ? (
+                <span className="font-mono text-[11px]">
+                  <span className="text-gray-500">{APP_PREFIX}-{routerEndpoint ? 'ns-' : ''}</span>
+                  <span className="text-cyan-400">{routerEndpoint ? ip : ip.replace(/\./g, '-')}</span>
+                  <span className="text-gray-500">-1</span>
+                </span>
+              ) : (
+                <span className="font-mono text-[11px] text-gray-500">—</span>
+              )}
             </Row>
             <Row label="My Disc ID">
               <span className="font-mono text-[10px] text-gray-400 break-all">{discID || '—'}</span>
@@ -115,7 +126,7 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
           </div>
 
           {/* Registry */}
-          <div className="px-5 py-4">
+          <div className={clsx('px-5 py-4', onLeave && 'border-b border-gray-800')}>
             <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-3">
               Registry ({peers.length} {peers.length === 1 ? 'peer' : 'peers'})
             </div>
@@ -132,6 +143,17 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
               </div>
             )}
           </div>
+
+          {onLeave && (
+            <div className="px-5 py-4">
+              <button
+                onClick={() => { onLeave(); onClose(); }}
+                className="w-full text-[12px] font-semibold bg-red-900/40 hover:bg-red-900/70 text-red-400 py-2 rounded-lg transition-colors"
+              >
+                Leave Namespace
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

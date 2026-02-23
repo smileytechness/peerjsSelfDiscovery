@@ -1,8 +1,8 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Contact, PeerInfo, ChatMessage } from '../lib/types';
+import { Contact, PeerInfo, ChatMessage, CustomNS, APP_PREFIX } from '../lib/types';
 import { extractDiscUUID } from '../lib/discovery';
 import { clsx } from 'clsx';
-import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio, Pencil } from 'lucide-react';
+import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio, Pencil, Plus } from 'lucide-react';
 
 interface SidebarProps {
   // My identity (shown in header)
@@ -40,6 +40,11 @@ interface SidebarProps {
   onShowProfile: () => void;
   onAcceptIncoming: (pid: string) => void;
   onDismissPending: (pid: string) => void;
+  // Custom namespaces
+  customNamespaces: Record<string, CustomNS>;
+  onJoinCustomNS: (name: string) => void;
+  onToggleCustomNSOffline: (slug: string, offline: boolean) => void;
+  onShowCustomNSInfo: (slug: string) => void;
 }
 
 function formatTimeSince(ts: number): string {
@@ -98,6 +103,10 @@ export function Sidebar({
   onShowProfile,
   onAcceptIncoming,
   onDismissPending,
+  customNamespaces,
+  onJoinCustomNS,
+  onToggleCustomNSOffline,
+  onShowCustomNSInfo,
 }: SidebarProps) {
   const allPIDs = Object.keys(peers);
   const incomingPIDs = allPIDs.filter(pid => peers[pid].pending === 'incoming');
@@ -107,6 +116,7 @@ export function Sidebar({
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
   const [nsExpanded, setNsExpanded] = useState(true);
+  const [nsInput, setNsInput] = useState('');
   const [installPrompt, setInstallPrompt] = useState<any>(null);
 
   useEffect(() => {
@@ -257,7 +267,11 @@ export function Sidebar({
                   <div className="space-y-1 text-[10px]">
                     <div className="flex justify-between">
                       <span className="text-gray-500">Namespace</span>
-                      <span className="font-mono text-gray-400">{networkIP}</span>
+                      <span className="font-mono text-[10px] truncate max-w-[130px]">
+                        <span className="text-gray-600">{APP_PREFIX}-</span>
+                        <span className="text-cyan-400">{networkIP.replace(/\./g, '-')}</span>
+                        <span className="text-gray-600">-1</span>
+                      </span>
                     </div>
                     {networkDiscID && (
                       <div className="flex justify-between">
@@ -301,6 +315,117 @@ export function Sidebar({
               ) : (
                 <div className="text-[11px] text-gray-600 italic px-1">Detecting network…</div>
               )}
+
+              {/* Custom namespace cards */}
+              {Object.values(customNamespaces).map((ns) => {
+                const nsUnknown = Object.keys(ns.registry).filter(did => !ns.registry[did].isMe && !ns.registry[did].knownPID);
+                const nsPeerCount = Object.keys(ns.registry).filter(k => !ns.registry[k].isMe).length;
+                const myEntry = Object.values(ns.registry).find(r => r.isMe);
+                const nsDiscID = myEntry?.discoveryID || '';
+                return (
+                  <div key={ns.slug} className={clsx('bg-gray-800 rounded-lg p-2.5 text-[11px]', ns.offline && 'opacity-50')}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-gray-300 font-medium truncate flex-1 mr-1">🏷 {ns.name}</span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => onToggleCustomNSOffline(ns.slug, !ns.offline)}
+                          className={clsx(
+                            'p-0.5 rounded transition-colors',
+                            ns.offline ? 'text-orange-400' : 'text-gray-500 hover:text-gray-300'
+                          )}
+                          title={ns.offline ? 'Paused — click to rejoin' : 'Pause this namespace'}
+                        >
+                          {ns.offline ? <WifiOff size={11} /> : <Wifi size={11} />}
+                        </button>
+                        <button
+                          onClick={() => onShowCustomNSInfo(ns.slug)}
+                          className={clsx(
+                            'text-[10px] font-mono px-1 py-0.5 rounded border flex items-center gap-0.5 hover:opacity-75 transition-opacity',
+                            ns.offline ? 'text-orange-400 border-orange-800' :
+                            ns.level === 0 ? 'text-gray-500 border-gray-700' :
+                            ns.isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
+                          )}
+                          title="View namespace routing info"
+                        >
+                          <Radio size={9} />
+                          {ns.offline ? 'Paused' : ns.level === 0 ? '…' : (ns.isRouter ? `Router L${ns.level}` : `Peer L${ns.level}`)}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-[10px]">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Namespace</span>
+                        <span className="font-mono text-[10px] truncate max-w-[130px]">
+                          <span className="text-gray-600">{APP_PREFIX}-ns-</span>
+                          <span className="text-cyan-400">{ns.slug}</span>
+                          <span className="text-gray-600">-1</span>
+                        </span>
+                      </div>
+                      {nsDiscID && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">My disc ID</span>
+                          <span className="font-mono text-gray-500 truncate max-w-[110px]">
+                            …{nsDiscID.slice(-12)}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Peers here</span>
+                        <span className="text-gray-400">{nsPeerCount}</span>
+                      </div>
+                    </div>
+                    {nsUnknown.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-gray-700 space-y-1.5">
+                        <div className="text-gray-500 text-[10px] mb-1">Nearby</div>
+                        {nsUnknown.map((did) => (
+                          <div key={did} className="flex items-center justify-between gap-1">
+                            <div className="min-w-0">
+                              <div className="text-gray-300 truncate text-[11px] font-medium">
+                                {ns.registry[did].friendlyName}
+                              </div>
+                              <div className="text-gray-600 font-mono text-[9px] truncate">
+                                {extractDiscUUID(did).slice(0, 10)}…
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => onConnect(did, ns.registry[did].friendlyName)}
+                              className="shrink-0 text-[10px] px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                            >
+                              Add
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Join namespace input */}
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const name = nsInput.trim();
+                  if (name) { onJoinCustomNS(name); setNsInput(''); }
+                }}
+                className="flex gap-1 mt-1"
+              >
+                <input
+                  type="text"
+                  value={nsInput}
+                  onChange={(e) => setNsInput(e.target.value)}
+                  placeholder="Join namespace…"
+                  className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-600"
+                />
+                <button
+                  type="submit"
+                  disabled={!nsInput.trim()}
+                  className="shrink-0 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded transition-colors"
+                  title="Join namespace"
+                >
+                  <Plus size={12} />
+                </button>
+              </form>
             </div>
           )}
         </div>

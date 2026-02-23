@@ -8,12 +8,16 @@ import {
   ChatMessage,
   FileTransfer,
   CHUNK_SIZE,
+  CustomNS,
 } from './types';
 import {
   makeRouterID,
   makeDiscID,
   extractDiscUUID,
   getPublicIP,
+  slugifyNamespace,
+  makeCustomRouterID,
+  makeCustomDiscID,
 } from './discovery';
 import {
   saveContacts,
@@ -67,6 +71,15 @@ export class P2PManager extends EventTarget {
   private readonly MAX_JOIN_ATTEMPTS = 3;
   private incomingFiles: Record<string, FileTransfer> = {};
   private pendingFiles: Record<string, File[]> = {};
+
+  // ─── Custom Namespaces ─────────────────────────────────────────────────────
+  private cns: Map<string, {
+    name: string; slug: string;
+    isRouter: boolean; level: number; offline: boolean;
+    registry: Record<string, PeerInfo>;
+    routerPeer: Peer | null; routerConn: DataConnection | null;
+    discPeer: Peer | null; pingTimer: any; monitorTimer: any;
+  }> = new Map();
 
   private privateKey: CryptoKey | null = null;
   private publicKey: CryptoKey | null = null;
@@ -175,6 +188,7 @@ export class P2PManager extends EventTarget {
     this.log(`Public IP: ${this.publicIP}`, 'ok');
     this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
     this.attemptNamespace(1);
+    this.cnsRestoreSaved();
 
     this.emitStatus();
   }
@@ -1413,10 +1427,19 @@ export class P2PManager extends EventTarget {
     Object.values(this.contacts).forEach(c => {
       if (c.conn?.open) c.conn.send({ type: 'name-update', name });
     });
-    // Re-checkin to namespace router so the registry reflects the new name
+    // Re-checkin to namespace routers so registries reflect the new name
     if (this.routerConn?.open) {
       this.routerConn.send({ type: 'checkin', discoveryID: this.discoveryID, friendlyname: name, publicKey: this.publicKeyStr });
     }
+    this.cns.forEach((s) => {
+      if (s.routerConn?.open) {
+        s.routerConn.send({ type: 'checkin', discoveryID: makeCustomDiscID(s.slug, this.discoveryUUID), friendlyname: name, publicKey: this.publicKeyStr });
+      }
+      if (s.registry[makeCustomDiscID(s.slug, this.discoveryUUID)]) {
+        s.registry[makeCustomDiscID(s.slug, this.discoveryUUID)].friendlyName = name;
+      }
+      if (s.isRouter) this.cnsBroadcast(s.slug);
+    });
     if (this.registry[this.discoveryID]) this.registry[this.discoveryID].friendlyName = name;
     if (this.isRouter) this.broadcastRegistry();
     this.emitPeerListUpdate();
@@ -1588,6 +1611,284 @@ export class P2PManager extends EventTarget {
 
   private emitPeerListUpdate() {
     this.dispatchEvent(new CustomEvent('peer-list-update'));
+  }
+
+  // ─── Custom Namespace Public API ─────────────────────────────────────────
+
+  public joinCustomNamespace(name: string) {
+    const slug = slugifyNamespace(name);
+    if (!slug || this.cns.has(slug)) return;
+    const state = {
+      name, slug, isRouter: false, level: 0, offline: false,
+      registry: {} as Record<string, PeerInfo>,
+      routerPeer: null as Peer | null, routerConn: null as DataConnection | null,
+      discPeer: null as Peer | null, pingTimer: null as any, monitorTimer: null as any,
+    };
+    this.cns.set(slug, state);
+    this.cnsSave();
+    this.cnsAttempt(slug, 1);
+    this.cnsEmit();
+    this.log(`Joining custom namespace: ${name}`, 'info');
+  }
+
+  public leaveCustomNamespace(slug: string) {
+    if (!this.cns.has(slug)) return;
+    this.cnsTeardown(slug);
+    this.cns.delete(slug);
+    this.cnsSave();
+    this.cnsEmit();
+    this.log(`Left custom namespace: ${slug}`, 'info');
+  }
+
+  public setCustomNSOffline(slug: string, offline: boolean) {
+    const s = this.cns.get(slug);
+    if (!s) return;
+    s.offline = offline;
+    if (offline) {
+      this.cnsTeardown(slug, true);
+      s.level = 0; s.isRouter = false;
+    } else {
+      if (this.persPeer && !this.persPeer.destroyed && !this.persPeer.disconnected) {
+        this.cnsAttempt(slug, 1);
+      }
+    }
+    this.cnsEmit();
+  }
+
+  public get customNamespaces(): Record<string, CustomNS> {
+    const out: Record<string, CustomNS> = {};
+    this.cns.forEach((s, k) => {
+      out[k] = { name: s.name, slug: s.slug, isRouter: s.isRouter, level: s.level, offline: s.offline, registry: { ...s.registry } };
+    });
+    return out;
+  }
+
+  // ─── Custom Namespace Internal ────────────────────────────────────────────
+
+  private cnsEmit() {
+    this.dispatchEvent(new CustomEvent('custom-ns-update'));
+    this.emitPeerListUpdate();
+  }
+
+  private cnsSave() {
+    const arr = Array.from(this.cns.values()).map(s => ({ name: s.name, slug: s.slug }));
+    localStorage.setItem('myapp-custom-ns', JSON.stringify(arr));
+  }
+
+  private cnsRestoreSaved() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('myapp-custom-ns') || '[]') as { name: string }[];
+      saved.forEach(({ name }) => {
+        const slug = slugifyNamespace(name);
+        if (!this.cns.has(slug)) this.joinCustomNamespace(name);
+      });
+    } catch {}
+  }
+
+  private cnsTeardown(slug: string, keepDisc = false) {
+    const s = this.cns.get(slug);
+    if (!s) return;
+    if (s.pingTimer) { clearInterval(s.pingTimer); s.pingTimer = null; }
+    if (s.monitorTimer) { clearInterval(s.monitorTimer); s.monitorTimer = null; }
+    if (s.routerPeer && !s.routerPeer.destroyed) { try { s.routerPeer.destroy(); } catch {} s.routerPeer = null; }
+    if (s.routerConn) { try { s.routerConn.close(); } catch {} s.routerConn = null; }
+    if (!keepDisc && s.discPeer && !s.discPeer.destroyed) { try { s.discPeer.destroy(); } catch {} s.discPeer = null; }
+  }
+
+  private cnsAttempt(slug: string, level: number) {
+    const s = this.cns.get(slug);
+    if (!s || s.offline || this.offlineMode || !this.persPeer || this.persPeer.destroyed) return;
+    if (level > this.MAX_NAMESPACE) { this.log(`[ns:${s.name}] Max levels reached`, 'err'); return; }
+    const routerID = makeCustomRouterID(slug, level);
+    this.log(`[ns:${s.name}] Attempting router L${level}`, 'info');
+    const rPeer = new Peer(routerID);
+    s.routerPeer = rPeer;
+    rPeer.on('open', () => {
+      if (!this.cns.has(slug)) { rPeer.destroy(); return; }
+      s.isRouter = true; s.level = level;
+      this.log(`[ns:${s.name}] Router L${level} claimed`, 'ok');
+      rPeer.on('connection', (conn: DataConnection) => this.cnsHandleRouterConn(slug, conn));
+      s.pingTimer = setInterval(() => this.cnsPing(slug), PING_IV);
+      this.cnsRegisterDisc(slug);
+      if (level > 1) s.monitorTimer = setInterval(() => this.cnsProbeLevel1(slug), 30000);
+      this.cnsEmit();
+    });
+    rPeer.on('error', (err: any) => {
+      s.routerPeer = null;
+      if (err.type === 'unavailable-id') this.cnsTryJoin(slug, level, 0);
+    });
+  }
+
+  private cnsTryJoin(slug: string, level: number, attempt: number) {
+    const s = this.cns.get(slug);
+    if (!s || s.offline || this.offlineMode || !this.persPeer || this.persPeer.destroyed) return;
+    if (attempt >= this.MAX_JOIN_ATTEMPTS) {
+      this.log(`[ns:${s.name}] Join L${level} failed — escalating`, 'info');
+      setTimeout(() => this.cnsAttempt(slug, level + 1), Math.random() * 3000);
+      return;
+    }
+    const routerID = makeCustomRouterID(slug, level);
+    const conn = this.persPeer.connect(routerID, { reliable: true });
+    let opened = false;
+    conn.on('open', () => {
+      opened = true;
+      const st = this.cns.get(slug);
+      if (!st) { conn.close(); return; }
+      st.routerConn = conn; st.isRouter = false; st.level = level;
+      this.log(`[ns:${s.name}] Joined L${level} as peer`, 'ok');
+      conn.send({ type: 'checkin', discoveryID: makeCustomDiscID(slug, this.discoveryUUID), friendlyname: this.friendlyName, publicKey: this.publicKeyStr });
+      this.cnsRegisterDisc(slug);
+      if (level > 1) st.monitorTimer = setInterval(() => this.cnsProbeLevel1(slug), 30000);
+      this.cnsEmit();
+    });
+    conn.on('data', (d: any) => {
+      const st = this.cns.get(slug);
+      if (!st) return;
+      if (d.type === 'registry') this.cnsMergeRegistry(slug, d.peers);
+      if (d.type === 'ping') conn.send({ type: 'pong' });
+      if (d.type === 'migrate') {
+        this.log(`[ns:${s.name}] Migrating to L${d.level}`, 'info');
+        this.cnsTeardown(slug); st.level = 0; st.isRouter = false;
+        setTimeout(() => this.cnsAttempt(slug, d.level), Math.random() * 2000);
+      }
+    });
+    conn.on('close', () => {
+      const st = this.cns.get(slug);
+      if (!st || !opened) return;
+      st.routerConn = null; st.level = 0; st.isRouter = false;
+      this.log(`[ns:${s.name}] Router dropped — rejoining`, 'info');
+      setTimeout(() => this.cnsTryJoin(slug, level, 0), 2000 + Math.random() * 3000);
+      this.cnsEmit();
+    });
+    conn.on('error', () => {
+      if (!opened) setTimeout(() => this.cnsTryJoin(slug, level, attempt + 1), 1500);
+    });
+  }
+
+  private cnsRegisterDisc(slug: string) {
+    const s = this.cns.get(slug);
+    if (!s) return;
+    const discID = makeCustomDiscID(slug, this.discoveryUUID);
+    if (s.discPeer && !s.discPeer.destroyed) {
+      if (!s.registry[discID]) {
+        s.registry[discID] = { discoveryID: discID, friendlyName: this.friendlyName, lastSeen: Date.now(), isMe: true, publicKey: this.publicKeyStr || undefined };
+      }
+      if (s.isRouter) this.cnsBroadcast(slug);
+      this.cnsEmit();
+      return;
+    }
+    const dp = new Peer(discID);
+    s.discPeer = dp;
+    dp.on('open', () => {
+      const st = this.cns.get(slug);
+      if (!st) { dp.destroy(); return; }
+      st.registry[discID] = { discoveryID: discID, friendlyName: this.friendlyName, lastSeen: Date.now(), isMe: true, publicKey: this.publicKeyStr || undefined };
+      if (st.isRouter) this.cnsBroadcast(slug);
+      this.log(`[ns:${s.name}] Discovery peer ready`, 'ok');
+      this.cnsEmit();
+    });
+    dp.on('connection', (conn: DataConnection) => {
+      conn.on('data', (d: any) => this.handleDiscData(d, conn));
+    });
+    dp.on('error', (err: any) => {
+      this.log(`[ns:${s.name}] Disc peer error: ${err.type}`, 'err');
+    });
+  }
+
+  private cnsHandleRouterConn(slug: string, conn: DataConnection) {
+    const s = this.cns.get(slug);
+    if (!s) return;
+    let checkedIn = false;
+    conn.on('data', (d: any) => {
+      const st = this.cns.get(slug);
+      if (!st) return;
+      if (d.type === 'checkin') {
+        checkedIn = true;
+        const did = d.discoveryID as string;
+        if (d.publicKey) {
+          const stale = Object.keys(st.registry).find(k => k !== did && !st.registry[k].isMe && st.registry[k].publicKey === d.publicKey);
+          if (stale) delete st.registry[stale];
+        }
+        let knownPID: string | undefined;
+        if (d.publicKey) knownPID = Object.keys(this.contacts).find(p => this.contacts[p].publicKey === d.publicKey) || undefined;
+        st.registry[did] = { discoveryID: did, friendlyName: d.friendlyname, lastSeen: Date.now(), conn, knownPID, publicKey: d.publicKey || undefined };
+        this.cnsBroadcast(slug);
+        this.cnsEmit();
+      }
+      if (d.type === 'pong') {
+        const key = Object.keys(st.registry).find(k => st.registry[k].conn === conn);
+        if (key) st.registry[key].lastSeen = Date.now();
+      }
+    });
+    conn.on('close', () => {
+      const st = this.cns.get(slug);
+      if (!st || !checkedIn) return;
+      const key = Object.keys(st.registry).find(k => st.registry[k].conn === conn);
+      if (key) { delete st.registry[key]; this.cnsBroadcast(slug); this.cnsEmit(); }
+    });
+  }
+
+  private cnsBroadcast(slug: string) {
+    const s = this.cns.get(slug);
+    if (!s || !s.isRouter) return;
+    const peers = Object.values(s.registry).map(r => ({ discoveryID: r.discoveryID, friendlyname: r.friendlyName, publicKey: r.publicKey }));
+    Object.values(s.registry).forEach(r => {
+      if (!r.isMe && r.conn?.open) { try { r.conn.send({ type: 'registry', peers }); } catch {} }
+    });
+  }
+
+  private cnsMergeRegistry(slug: string, peers: any[]) {
+    const s = this.cns.get(slug);
+    if (!s) return;
+    const myDiscID = makeCustomDiscID(slug, this.discoveryUUID);
+    const newReg: Record<string, PeerInfo> = {};
+    if (s.registry[myDiscID]) newReg[myDiscID] = s.registry[myDiscID];
+    peers.forEach((p: any) => {
+      const did = p.discoveryID as string;
+      if (did === myDiscID) return;
+      if (p.publicKey) {
+        const stale = Object.keys(newReg).find(k => k !== did && !newReg[k].isMe && newReg[k].publicKey === p.publicKey);
+        if (stale) delete newReg[stale];
+      }
+      let knownPID: string | undefined;
+      if (p.publicKey) knownPID = Object.keys(this.contacts).find(pid => this.contacts[pid].publicKey === p.publicKey) || undefined;
+      if (knownPID && this.contacts[knownPID]) { this.contacts[knownPID].onNetwork = true; this.contacts[knownPID].networkDiscID = did; }
+      newReg[did] = { discoveryID: did, friendlyName: p.friendlyname, lastSeen: Date.now(), knownPID, publicKey: p.publicKey || undefined };
+    });
+    s.registry = newReg;
+    this.emitPeerListUpdate();
+    this.cnsEmit();
+  }
+
+  private cnsPing(slug: string) {
+    const s = this.cns.get(slug);
+    if (!s || !s.isRouter) return;
+    const now = Date.now();
+    Object.keys(s.registry).forEach(did => {
+      const r = s.registry[did];
+      if (r.isMe) return;
+      if (r.conn?.open) { try { r.conn.send({ type: 'ping' }); } catch {} }
+      if (now - r.lastSeen > TTL + 10000) { delete s.registry[did]; this.cnsBroadcast(slug); this.cnsEmit(); }
+    });
+  }
+
+  private cnsProbeLevel1(slug: string) {
+    const s = this.cns.get(slug);
+    if (!s || s.level <= 1 || s.offline || !this.persPeer) return;
+    const l1ID = makeCustomRouterID(slug, 1);
+    const testConn = this.persPeer.connect(l1ID, { reliable: true });
+    const timer = setTimeout(() => { try { testConn.close(); } catch {} }, 4000);
+    testConn.on('open', () => {
+      clearTimeout(timer); testConn.close();
+      this.log(`[ns:${s.name}] L1 available — migrating`, 'info');
+      if (s.isRouter) {
+        Object.values(s.registry).forEach(r => {
+          if (!r.isMe && r.conn?.open) { try { r.conn.send({ type: 'migrate', level: 1 }); } catch {} }
+        });
+      }
+      setTimeout(() => { this.cnsTeardown(slug); s.level = 0; s.isRouter = false; this.cnsAttempt(slug, 1); }, Math.random() * 2000);
+    });
+    testConn.on('error', () => { clearTimeout(timer); });
   }
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { p2p } from '../lib/p2p';
-import { Contact, ChatMessage, PeerInfo } from '../lib/types';
+import { Contact, ChatMessage, PeerInfo, CustomNS } from '../lib/types';
 
 export function useP2P() {
   const [status, setStatus] = useState({
@@ -22,6 +22,7 @@ export function useP2P() {
   const [logs, setLogs] = useState<{ msg: string; type: string; ts: number }[]>([]);
   const [offlineMode, setOfflineModeState] = useState(false);
   const [namespaceOffline, setNamespaceOfflineState] = useState(false);
+  const [customNamespaces, setCustomNamespaces] = useState<Record<string, CustomNS>>(() => p2p.customNamespaces);
   const [lastRead, setLastRead] = useState<Record<string, number>>(() => {
     try { return JSON.parse(localStorage.getItem('myapp-lastread') || '{}'); } catch { return {}; }
   });
@@ -38,11 +39,13 @@ export function useP2P() {
     const onLog = (e: any) => {
       setLogs((prev: { msg: string; type: string; ts: number }[]) => [...prev, { ...e.detail, ts: Date.now() }]);
     };
+    const onCNS = () => setCustomNamespaces({ ...p2p.customNamespaces });
 
     p2p.addEventListener('status-change', onStatus);
     p2p.addEventListener('peer-list-update', onPeerList);
     p2p.addEventListener('message', onMessage);
     p2p.addEventListener('log', onLog);
+    p2p.addEventListener('custom-ns-update', onCNS);
 
     // Initial state
     setPeers({ ...p2p.contacts });
@@ -67,6 +70,7 @@ export function useP2P() {
       p2p.removeEventListener('peer-list-update', onPeerList);
       p2p.removeEventListener('message', onMessage);
       p2p.removeEventListener('log', onLog);
+      p2p.removeEventListener('custom-ns-update', onCNS);
     };
   }, []);
 
@@ -99,6 +103,9 @@ export function useP2P() {
   const retryMessage = useCallback((pid: string, id: string) => p2p.retryMessage(pid, id), []);
   const updateName = useCallback((name: string) => p2p.updateFriendlyName(name), []);
   const acceptIncoming = useCallback((pid: string) => p2p.acceptIncomingRequest(pid), []);
+  const joinCustomNS = useCallback((name: string) => p2p.joinCustomNamespace(name), []);
+  const leaveCustomNS = useCallback((slug: string) => p2p.leaveCustomNamespace(slug), []);
+  const toggleCustomNSOffline = useCallback((slug: string, offline: boolean) => p2p.setCustomNSOffline(slug, offline), []);
   const setOfflineMode = useCallback((offline: boolean) => {
     p2p.setOfflineMode(offline);
     setOfflineModeState(offline);
@@ -119,6 +126,7 @@ export function useP2P() {
     unreadCounts,
     offlineMode,
     namespaceOffline,
+    customNamespaces,
     markRead,
     init,
     connect,
@@ -132,6 +140,9 @@ export function useP2P() {
     retryMessage,
     updateName,
     acceptIncoming,
+    joinCustomNS,
+    leaveCustomNS,
+    toggleCustomNSOffline,
     setOfflineMode,
     setNamespaceOffline,
     p2p,
