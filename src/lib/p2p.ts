@@ -921,12 +921,21 @@ export class P2PManager extends EventTarget {
       return;
     }
 
+    // Immediately create a pending contact so the sender sees "Request sent"
+    if (!this.contacts[targetID]) {
+      this.contacts[targetID] = { friendlyName: fname, discoveryID: isPersistent ? null : targetID, discoveryUUID: '', pending: 'outgoing' };
+      if (!this.chats[targetID]) this.chats[targetID] = [];
+      saveContacts(this.contacts);
+      saveChats(this.chats);
+      this.emitPeerListUpdate();
+    }
+
     const conn = peer.connect(targetID, { reliable: true });
     conn.on('open', async () => {
       this.log(`Handshake channel open with ${targetID}`, 'info');
       const ts = String(Date.now());
       const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
-      conn.send({ type: 'request', friendlyname: this.friendlyName, publicKey: this.publicKeyStr, ts, signature });
+      conn.send({ type: 'request', friendlyname: this.friendlyName, publicKey: this.publicKeyStr, persistentID: this.persistentID, ts, signature });
     });
 
     conn.on('data', (d: any) => {
@@ -944,12 +953,17 @@ export class P2PManager extends EventTarget {
         const dupPID = d.publicKey ? this.findContactByPublicKey(d.publicKey, d.persistentID) : null;
         if (dupPID) this.migrateContact(dupPID, d.persistentID);
 
+        // Remove the pending placeholder and create the real contact under the confirmed PID
+        if (isPersistent && this.contacts[targetID]?.pending) {
+          delete this.contacts[targetID];
+        }
+
         this.contacts[d.persistentID] = {
           ...(this.contacts[d.persistentID] || {}),
           friendlyName: fname,
           discoveryID: isPersistent ? null : targetID,
           discoveryUUID: d.discoveryUUID,
-          conn: null
+          conn: null,
         };
 
         if (!this.chats[d.persistentID]) this.chats[d.persistentID] = [];
@@ -962,6 +976,12 @@ export class P2PManager extends EventTarget {
       }
       if (d.type === 'rejected') {
         this.log(`${fname} rejected the connection`, 'err');
+        // Remove pending placeholder on rejection
+        if (this.contacts[targetID]?.pending) {
+          delete this.contacts[targetID];
+          saveContacts(this.contacts);
+          this.emitPeerListUpdate();
+        }
         conn.close();
       }
     });
@@ -989,6 +1009,7 @@ export class P2PManager extends EventTarget {
           fingerprint = Array.from(new Uint8Array(hash)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
         } catch {}
       }
+      const requesterPID = d.persistentID as string | undefined;
       this.log(`Incoming connection request from ${fname}${verified ? ' (verified)' : ''}`, 'info');
       const event = new CustomEvent('connection-request', {
         detail: {
@@ -1003,7 +1024,25 @@ export class P2PManager extends EventTarget {
           reject: () => {
             conn.send({ type: 'rejected' });
             setTimeout(() => conn.close(), 500);
-          }
+          },
+          saveForLater: () => {
+            if (!requesterPID) return;
+            this.contacts[requesterPID] = {
+              friendlyName: fname,
+              discoveryID: null,
+              discoveryUUID: '',
+              pending: 'incoming',
+              publicKey: d.publicKey || undefined,
+              pendingFingerprint: fingerprint || undefined,
+              pendingVerified: verified,
+            };
+            if (!this.chats[requesterPID]) this.chats[requesterPID] = [];
+            saveContacts(this.contacts);
+            saveChats(this.chats);
+            this.emitPeerListUpdate();
+            this.log(`Saved incoming request from ${fname} for later`, 'info');
+            conn.close();
+          },
         }
       });
       this.dispatchEvent(event);
@@ -1166,6 +1205,7 @@ export class P2PManager extends EventTarget {
       this.contacts[pid].conn = conn;
       this.contacts[pid].friendlyName = d.friendlyname;
       this.contacts[pid].lastSeen = Date.now();
+      delete this.contacts[pid].pending; // clear outgoing/incoming pending — connection is live
       if (!this.chats[pid]) this.chats[pid] = [];
 
       if (isNew) {
@@ -1352,6 +1392,18 @@ export class P2PManager extends EventTarget {
     this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
     const c = this.contacts[pid];
     if (c) this.connectPersistent(pid, c.friendlyName);
+  }
+
+  public acceptIncomingRequest(pid: string) {
+    const c = this.contacts[pid];
+    if (!c || c.pending !== 'incoming') return;
+    const fname = c.friendlyName;
+    // Clear pending flag before connecting so hello handler won't re-add it
+    delete c.pending;
+    saveContacts(this.contacts);
+    this.emitPeerListUpdate();
+    this.connectPersistent(pid, fname);
+    this.log(`Accepted saved request from ${fname}`, 'ok');
   }
 
   public updateFriendlyName(name: string) {

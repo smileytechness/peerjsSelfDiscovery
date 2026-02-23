@@ -99,6 +99,7 @@ export default function App() {
     deleteMessage,
     retryMessage,
     updateName,
+    acceptIncoming,
     setOfflineMode,
     setNamespaceOffline,
   } = useP2P();
@@ -113,7 +114,7 @@ export default function App() {
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const [connRequest, setConnRequest] = useState<{ fname: string; publicKey?: string; fingerprint?: string; verified?: boolean; accept: () => void; reject: () => void } | null>(null);
+  const [connRequest, setConnRequest] = useState<{ fname: string; publicKey?: string; fingerprint?: string; verified?: boolean; accept: () => void; reject: () => void; saveForLater: () => void } | null>(null);
   const [pendingConnectPID] = useState<string | null>(() => {
     try { return new URL(window.location.href).searchParams.get('connect'); } catch { return null; }
   });
@@ -375,6 +376,8 @@ export default function App() {
           onAddContact={() => setShowConnect(true)}
           onShowContactInfo={(pid) => setContactModalPid(pid)}
           onShowProfile={() => setShowProfile(true)}
+          onAcceptIncoming={(pid) => acceptIncoming(pid)}
+          onDismissPending={(pid) => { deleteContact(pid); if (activeChat === pid) setActiveChat(null); }}
         />
 
         <div className={clsx('flex-1 flex flex-col min-w-0', !activeChat && sidebarOpen ? 'hidden md:flex' : 'flex')}>
@@ -517,14 +520,19 @@ export default function App() {
                 <div className="text-gray-400">No public key provided — identity unverified</div>
               )}
             </div>
-            <div className="flex gap-3">
+            <div className="flex gap-2">
               <button
                 onClick={() => { connRequest.accept(); setConnRequest(null); }}
                 className="flex-1 bg-green-600 hover:bg-green-700 text-white font-semibold py-2 rounded text-sm"
               >Accept</button>
               <button
-                onClick={() => { connRequest.reject(); setConnRequest(null); }}
+                onClick={() => { connRequest.saveForLater(); setConnRequest(null); }}
                 className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-300 font-semibold py-2 rounded text-sm"
+                title="Save to contacts — accept later"
+              >Later</button>
+              <button
+                onClick={() => { connRequest.reject(); setConnRequest(null); }}
+                className="flex-1 bg-red-900/60 hover:bg-red-900 text-red-300 font-semibold py-2 rounded text-sm"
               >Reject</button>
             </div>
           </div>

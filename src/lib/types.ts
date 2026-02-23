@@ -23,8 +23,11 @@ export interface Contact {
   conn?: any;
   onNetwork?: boolean;
   networkDiscID?: string | null;
-  publicKey?: string; // For Zero Trust
-  lastSeen?: number;  // Timestamp of last interaction
+  publicKey?: string;            // For Zero Trust
+  lastSeen?: number;             // Timestamp of last interaction
+  pending?: 'outgoing' | 'incoming'; // outgoing = we sent request; incoming = they sent, we saved
+  pendingFingerprint?: string;   // key fingerprint from their request
+  pendingVerified?: boolean;     // signature verified at request time
 }
 
 export interface ChatMessage {

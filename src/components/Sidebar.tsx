@@ -38,6 +38,8 @@ interface SidebarProps {
   onAddContact: () => void;
   onShowContactInfo: (pid: string) => void;
   onShowProfile: () => void;
+  onAcceptIncoming: (pid: string) => void;
+  onDismissPending: (pid: string) => void;
 }
 
 function formatTimeSince(ts: number): string {
@@ -94,8 +96,13 @@ export function Sidebar({
   onAddContact,
   onShowContactInfo,
   onShowProfile,
+  onAcceptIncoming,
+  onDismissPending,
 }: SidebarProps) {
-  const savedPIDs = Object.keys(peers);
+  const allPIDs = Object.keys(peers);
+  const incomingPIDs = allPIDs.filter(pid => peers[pid].pending === 'incoming');
+  const outgoingPIDs = allPIDs.filter(pid => peers[pid].pending === 'outgoing');
+  const savedPIDs = allPIDs.filter(pid => !peers[pid].pending);
   const unknownOnNet = Object.keys(registry).filter((did) => !registry[did].isMe && !registry[did].knownPID);
   const peerCount = Object.keys(registry).filter(k => !registry[k].isMe).length;
 
@@ -298,6 +305,43 @@ export function Sidebar({
           )}
         </div>
 
+        {/* ── Pending incoming requests ── */}
+        {incomingPIDs.length > 0 && (
+          <div className="border-b border-gray-800 pt-1 pb-2">
+            <div className="px-3 py-1.5 text-[10px] text-yellow-500 uppercase tracking-wider">
+              📨 Incoming Requests ({incomingPIDs.length})
+            </div>
+            {incomingPIDs.map((pid) => {
+              const contact = peers[pid];
+              return (
+                <div key={pid} className="px-3 py-2 bg-yellow-900/10 border-l-2 border-yellow-700/50 mx-2 rounded-lg mb-1">
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <span className="font-semibold text-gray-200 text-sm flex-1 truncate">{contact.friendlyName}</span>
+                    {contact.pendingVerified !== undefined && (
+                      <span className={clsx('text-[9px] font-mono px-1 py-0.5 rounded', contact.pendingVerified ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400')}>
+                        {contact.pendingVerified ? '✓' : '⚠'}
+                      </span>
+                    )}
+                  </div>
+                  {contact.pendingFingerprint && (
+                    <div className="text-[10px] font-mono text-purple-400 mb-1.5 pl-0 truncate">{contact.pendingFingerprint}</div>
+                  )}
+                  <div className="flex gap-1.5">
+                    <button
+                      onClick={() => onAcceptIncoming(pid)}
+                      className="flex-1 text-[11px] font-semibold bg-green-700 hover:bg-green-600 text-white py-1 rounded transition-colors"
+                    >Accept</button>
+                    <button
+                      onClick={() => onDismissPending(pid)}
+                      className="flex-1 text-[11px] font-semibold bg-gray-700 hover:bg-gray-600 text-gray-300 py-1 rounded transition-colors"
+                    >Dismiss</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* ── Contacts ── */}
         <div className="pt-1">
           {/* Section header with Add button */}
@@ -313,6 +357,25 @@ export function Sidebar({
               <UserPlus size={11} /> Add
             </button>
           </div>
+
+          {/* Outgoing pending (request sent, waiting) */}
+          {outgoingPIDs.map((pid) => {
+            const contact = peers[pid];
+            return (
+              <div key={pid} className="px-3 py-2 border-l-2 border-blue-800/50 transition-colors">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full shrink-0 bg-blue-500 animate-pulse" />
+                  <span className="font-semibold text-gray-400 text-sm flex-1 truncate">{contact.friendlyName}</span>
+                  <button
+                    onClick={() => onDismissPending(pid)}
+                    className="p-1 hover:bg-gray-700 rounded text-gray-600 hover:text-gray-400 shrink-0"
+                    title="Cancel request"
+                  ><Info size={13} /></button>
+                </div>
+                <div className="pl-4 mt-0.5 text-[10px] text-blue-500 italic">Request sent — awaiting response…</div>
+              </div>
+            );
+          })}
 
           {savedPIDs.length > 0 ? (
             <>
@@ -332,13 +395,12 @@ export function Sidebar({
                     onTouchEnd={cancelLongPress}
                     onTouchMove={cancelLongPress}
                     className={clsx(
-                      'px-3 py-2.5 cursor-pointer border-l-2 transition-colors group',
+                      'px-3 py-2.5 cursor-pointer border-l-2 transition-colors',
                       activeChat === pid
                         ? 'bg-gray-800 border-blue-500'
                         : 'border-transparent hover:bg-gray-800/60 hover:border-gray-700'
                     )}
                   >
-                    {/* Row 1: status dot + name + unread badge + info */}
                     <div className="flex items-center gap-2">
                       <span className={clsx(
                         'w-2 h-2 rounded-full shrink-0',
@@ -360,14 +422,9 @@ export function Sidebar({
                         <Info size={13} />
                       </button>
                     </div>
-
-                    {/* Row 2: last message preview + time */}
                     <div className="flex items-center justify-between mt-0.5 pl-4 gap-2">
                       <span className="text-[11px] text-gray-500 italic truncate flex-1">
-                        {preview
-                          ? preview.text
-                          : <span className="not-italic text-gray-600">no messages yet</span>
-                        }
+                        {preview ? preview.text : <span className="not-italic text-gray-600">no messages yet</span>}
                       </span>
                       {preview && (
                         <span className="text-[10px] text-gray-600 shrink-0">{formatTime(preview.ts)}</span>
@@ -377,12 +434,10 @@ export function Sidebar({
                 );
               })}
             </>
-          ) : (
+          ) : outgoingPIDs.length === 0 && (
             <div className="p-4 text-center">
               <div className="text-xs text-gray-600">No contacts yet</div>
-              <div className="text-[11px] text-gray-700 mt-1">
-                Add nearby peers above or tap Add
-              </div>
+              <div className="text-[11px] text-gray-700 mt-1">Add nearby peers above or tap Add</div>
             </div>
           )}
         </div>
