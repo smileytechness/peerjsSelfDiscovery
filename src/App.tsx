@@ -7,6 +7,7 @@ import { SetupModal } from './components/SetupModal';
 import { ShareModal } from './components/ShareModal';
 import { ConnectModal } from './components/ConnectModal';
 import { MediaOverlay } from './components/MediaOverlay';
+import { NamespaceModal } from './components/NamespaceModal';
 import { p2p } from './lib/p2p';
 import { BUILD } from './lib/version';
 import { clsx } from 'clsx';
@@ -37,6 +38,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [showShare, setShowShare] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showNamespaceInfo, setShowNamespaceInfo] = useState(false);
   const [setupNeeded, setSetupNeeded] = useState(!localStorage.getItem('myapp-name'));
   const [contactModalPid, setContactModalPid] = useState<string | null>(null);
 
@@ -187,12 +189,17 @@ export default function App() {
           offlineMode={offlineMode}
           onShare={() => setShowShare(true)}
           onToggleOffline={() => setOfflineMode(!offlineMode)}
+          signalingState={status.signalingState}
+          lastSignalingTs={status.lastSignalingTs}
+          reconnectAttempt={status.reconnectAttempt}
           networkRole={status.role}
           networkIP={status.ip}
           networkDiscID={status.did}
           namespaceLevel={status.namespaceLevel}
+          isRouter={status.role.startsWith('Router')}
           namespaceOffline={namespaceOffline}
           onToggleNamespace={() => setNamespaceOffline(!namespaceOffline)}
+          onShowNamespaceInfo={() => setShowNamespaceInfo(true)}
           peers={peers}
           registry={registry}
           chats={chats}
@@ -267,6 +274,18 @@ export default function App() {
       )}
 
       {showShare && <ShareModal pid={status.pid} onClose={() => setShowShare(false)} />}
+
+      {showNamespaceInfo && (
+        <NamespaceModal
+          role={status.role}
+          ip={status.ip}
+          discID={status.did}
+          namespaceLevel={status.namespaceLevel}
+          isRouter={status.role.startsWith('Router')}
+          registry={registry}
+          onClose={() => setShowNamespaceInfo(false)}
+        />
+      )}
 
       {showConnect && (
         <ConnectModal

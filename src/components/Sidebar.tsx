@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Contact, PeerInfo, ChatMessage } from '../lib/types';
 import { extractDiscUUID } from '../lib/discovery';
 import { clsx } from 'clsx';
-import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download } from 'lucide-react';
+import { Info, ChevronDown, ChevronRight, Key, Share2, UserPlus, Wifi, WifiOff, Download, Radio } from 'lucide-react';
 
 interface SidebarProps {
   // My identity (shown in header)
@@ -13,13 +13,19 @@ interface SidebarProps {
   offlineMode: boolean;
   onShare: () => void;
   onToggleOffline: () => void;
+  // Signaling state detail
+  signalingState: 'connected' | 'reconnecting' | 'offline';
+  lastSignalingTs: number;
+  reconnectAttempt: number;
   // Network / discovery
   networkRole: string;
   networkIP: string;
   networkDiscID: string;
   namespaceLevel: number;
+  isRouter: boolean;
   namespaceOffline: boolean;
   onToggleNamespace: () => void;
+  onShowNamespaceInfo: () => void;
   // Contacts / chats
   peers: Record<string, Contact>;
   registry: Record<string, PeerInfo>;
@@ -31,6 +37,15 @@ interface SidebarProps {
   onConnect: (did: string, fname: string) => void;
   onAddContact: () => void;
   onShowContactInfo: (pid: string) => void;
+}
+
+function formatTimeSince(ts: number): string {
+  if (!ts) return '—';
+  const diff = Date.now() - ts;
+  if (diff < 10000) return 'just now';
+  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  return `${Math.floor(diff / 3600000)}h ago`;
 }
 
 function formatTime(ts: number): string {
@@ -56,12 +71,17 @@ export function Sidebar({
   offlineMode,
   onShare,
   onToggleOffline,
+  signalingState,
+  lastSignalingTs,
+  reconnectAttempt,
   networkRole,
   networkIP,
   networkDiscID,
   namespaceLevel,
+  isRouter,
   namespaceOffline,
   onToggleNamespace,
+  onShowNamespaceInfo,
   peers,
   registry,
   chats,
@@ -156,6 +176,23 @@ export function Sidebar({
             <span className="font-mono text-[10px] text-purple-400">{myFingerprint}</span>
           </div>
         )}
+        {/* Signaling state detail */}
+        <div className="mt-0.5 ml-4 flex items-center gap-1">
+          <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0',
+            signalingState === 'connected' ? 'bg-green-500' :
+            signalingState === 'reconnecting' ? 'bg-orange-400 animate-pulse' : 'bg-gray-600'
+          )} />
+          <span className={clsx('text-[10px] font-mono',
+            signalingState === 'connected' ? 'text-green-600' :
+            signalingState === 'reconnecting' ? 'text-orange-400' : 'text-gray-600'
+          )}>
+            {signalingState === 'connected'
+              ? `signaling ok · ${formatTimeSince(lastSignalingTs)}`
+              : signalingState === 'reconnecting'
+              ? `reconnecting${reconnectAttempt > 0 ? ` (${reconnectAttempt})` : '…'}`
+              : 'offline mode'}
+          </span>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
@@ -188,13 +225,18 @@ export function Sidebar({
                       >
                         {namespaceOffline ? <WifiOff size={11} /> : <Wifi size={11} />}
                       </button>
-                      <span className={clsx(
-                        'text-[10px] font-mono px-1 py-0.5 rounded border',
-                        namespaceOffline ? 'text-orange-400 border-orange-800' :
-                        isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
-                      )}>
+                      <button
+                        onClick={onShowNamespaceInfo}
+                        className={clsx(
+                          'text-[10px] font-mono px-1 py-0.5 rounded border flex items-center gap-0.5 hover:opacity-75 transition-opacity',
+                          namespaceOffline ? 'text-orange-400 border-orange-800' :
+                          isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
+                        )}
+                        title="View namespace routing info"
+                      >
+                        <Radio size={9} />
                         {namespaceOffline ? 'Paused' : namespaceLevel > 0 ? (isRouter ? `Router L${namespaceLevel}` : `Peer L${namespaceLevel}`) : '…'}
-                      </span>
+                      </button>
                     </div>
                   </div>
                   <div className="space-y-1 text-[10px]">

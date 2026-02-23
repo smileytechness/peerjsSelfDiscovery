@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { X, Copy, Activity, MessageCircle, Trash2, Key, CheckCircle } from 'lucide-react';
 import { Contact } from '../lib/types';
 import { clsx } from 'clsx';
@@ -24,16 +24,10 @@ function formatLastSeen(ts?: number): string {
 export function ContactModal({ pid, contact, onClose, onPing, onChat, onDelete }: ContactModalProps) {
   const isOnline = !!contact.conn?.open;
   const hasKey = !!contact.publicKey;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text).catch(() => {});
-  };
-
-  const handleDelete = () => {
-    if (window.confirm(`Remove ${contact.friendlyName} from contacts?`)) {
-      onDelete(pid);
-      onClose();
-    }
   };
 
   return (
@@ -112,27 +106,49 @@ export function ContactModal({ pid, contact, onClose, onPing, onChat, onDelete }
         </div>
 
         {/* Actions */}
-        <div className="px-5 pb-5 flex gap-2">
-          <button
-            onClick={() => { onPing(pid); onClose(); }}
-            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg py-2 text-sm transition-colors"
-          >
-            <Activity size={14} /> Ping
-          </button>
-          <button
-            onClick={() => { onChat(pid); onClose(); }}
-            className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium transition-colors"
-          >
-            <MessageCircle size={14} /> Chat
-          </button>
-          <button
-            onClick={handleDelete}
-            className="p-2 flex items-center justify-center bg-gray-800 hover:bg-red-900/40 text-gray-500 hover:text-red-400 rounded-lg transition-colors"
-            title="Delete contact"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
+        {confirmingDelete ? (
+          <div className="px-5 pb-5">
+            <div className="text-sm text-gray-400 mb-3 text-center">
+              Remove <span className="text-white font-semibold">{contact.friendlyName}</span> from contacts?
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmingDelete(false)}
+                className="flex-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg py-2 text-sm transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { onDelete(pid); onClose(); }}
+                className="flex-1 bg-red-700 hover:bg-red-600 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-5 pb-5 flex gap-2">
+            <button
+              onClick={() => { onPing(pid); onClose(); }}
+              className="flex-1 flex items-center justify-center gap-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg py-2 text-sm transition-colors"
+            >
+              <Activity size={14} /> Ping
+            </button>
+            <button
+              onClick={() => { onChat(pid); onClose(); }}
+              className="flex-1 flex items-center justify-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg py-2 text-sm font-medium transition-colors"
+            >
+              <MessageCircle size={14} /> Chat
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              className="p-2 flex items-center justify-center bg-gray-800 hover:bg-red-900/40 text-gray-500 hover:text-red-400 rounded-lg transition-colors"
+              title="Delete contact"
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

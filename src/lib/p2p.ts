@@ -53,6 +53,8 @@ export class P2PManager extends EventTarget {
   public isRouter: boolean = false;
   public namespaceLevel: number = 0;
   public persConnected: boolean = false;
+  public signalingState: 'connected' | 'reconnecting' | 'offline' = 'offline';
+  public lastSignalingTs: number = 0;
   private pingTimer: any = null;
   private heartbeatTimer: any = null;
   private namespaceMonitorTimer: any = null;
@@ -202,12 +204,31 @@ export class P2PManager extends EventTarget {
   }
 
   private async handleNetworkChange() {
+    if (this.offlineMode) return;
     const nc = (navigator as any).connection;
     const type = nc?.type || nc?.effectiveType || 'unknown';
     this.log(`Network type changed → ${type}`, 'info');
 
-    // Always reconnect persistent peer first (cross-network)
-    this.handleOnline();
+    // Force the persistent peer to re-register on the new network interface.
+    // Simply calling handleOnline() is not enough: persPeer.disconnected may still
+    // be false when the network type changes (the WebSocket looks alive briefly
+    // before the server-side keepalive timeout fires). We force disconnect → reconnect
+    // so the open event fires immediately, triggering reconnectOfflineContacts().
+    if (this.persPeer && !this.persPeer.destroyed) {
+      this.reconnectBackoff = 0;
+      this.signalingState = 'reconnecting';
+      this.emitStatus();
+      try {
+        if (!this.persPeer.disconnected) this.persPeer.disconnect();
+        this.persPeer.reconnect();
+      } catch {
+        this.persPeer.destroy();
+        this.persPeer = null;
+        this.registerPersistent();
+      }
+    } else {
+      this.handleOnline();
+    }
 
     if (!this.publicIP) return;
 
@@ -247,6 +268,9 @@ export class P2PManager extends EventTarget {
           namespaceLevel: this.namespaceLevel,
           pubkeyFingerprint: this.pubkeyFingerprint,
           persConnected: this.persConnected,
+          signalingState: this.signalingState,
+          lastSignalingTs: this.lastSignalingTs,
+          reconnectAttempt: this.reconnectBackoff,
         },
       })
     );
@@ -264,6 +288,8 @@ export class P2PManager extends EventTarget {
 
     this.persPeer.on('open', (id) => {
       this.persConnected = true;
+      this.signalingState = 'connected';
+      this.lastSignalingTs = Date.now();
       this.reconnectBackoff = 0;
       this.log(`Persistent ID registered: ${id}`, 'ok');
       this.emitStatus();
@@ -273,6 +299,7 @@ export class P2PManager extends EventTarget {
 
     this.persPeer.on('disconnected', () => {
       this.persConnected = false;
+      this.signalingState = 'reconnecting';
       this.log('Persistent peer lost signaling connection — reconnecting...', 'err');
       this.emitStatus();
       this.schedulePersReconnect();
@@ -325,9 +352,11 @@ export class P2PManager extends EventTarget {
         try { this.persPeer.disconnect(); } catch {}
       }
       this.persConnected = false;
+      this.signalingState = 'offline';
       this.emitStatus();
     } else {
       this.namespaceOffline = false; // re-enable namespace when going online
+      this.signalingState = 'reconnecting';
       this.handleOnline();
     }
   }
@@ -338,7 +367,9 @@ export class P2PManager extends EventTarget {
       this.clearNamespaceMonitor();
       if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
       if (this.routerPeer) { this.routerPeer.destroy(); this.routerPeer = null; }
-      if (this.discPeer) { this.discPeer.destroy(); this.discPeer = null; }
+      // Keep discPeer alive — destroying it releases our disc ID on PeerJS server,
+      // and if we rejoin quickly the same ID gets unavailable-id, generating a new UUID
+      // and causing us to appear as an unknown peer in our own registry.
       if (this.routerConn) { this.routerConn.close(); this.routerConn = null; }
       this.isRouter = false;
       this.namespaceLevel = 0;
@@ -645,6 +676,25 @@ export class P2PManager extends EventTarget {
   // ─── Discovery peer registration ──────────────────────────────────────────
 
   private registerDisc() {
+    // Reuse existing discPeer if it's still open — prevents the unavailable-id race
+    // that occurs when rejoining namespace shortly after a pause (PeerJS server hasn't
+    // released the old ID yet, so we'd generate a new UUID and appear as an unknown peer).
+    if (this.discPeer && !this.discPeer.destroyed) {
+      const id = this.discoveryID;
+      if (!this.registry[id]) {
+        this.registry[id] = {
+          discoveryID: id,
+          friendlyName: this.friendlyName,
+          lastSeen: Date.now(),
+          isMe: true,
+          publicKey: this.publicKeyStr || undefined,
+        };
+      }
+      if (this.isRouter) this.broadcastRegistry();
+      this.emitStatus();
+      return;
+    }
+
     if (this.discPeer) { this.discPeer.destroy(); this.discPeer = null; }
 
     this.discPeer = new Peer(this.discoveryID);
@@ -686,6 +736,18 @@ export class P2PManager extends EventTarget {
     conn.on('data', (d: any) => {
       if (d.type === 'checkin') {
         const uuid = extractDiscUUID(d.discoveryID);
+
+        // Dedup: remove stale entry for this same device (same public key).
+        // Happens when a device reconnects quickly and the old disc ID hasn't timed out yet.
+        if (d.publicKey) {
+          const staleKey = Object.keys(this.registry).find(did =>
+            did !== d.discoveryID && !!this.registry[did].publicKey && this.registry[did].publicKey === d.publicKey
+          );
+          if (staleKey) {
+            this.log(`Replaced stale disc entry: …${staleKey.slice(-8)} → …${d.discoveryID.slice(-8)}`, 'info');
+            delete this.registry[staleKey];
+          }
+        }
 
         // Match existing contact by public key first, then by discoveryUUID
         const knownPID = Object.keys(this.contacts).find((pid) => {
@@ -779,6 +841,15 @@ export class P2PManager extends EventTarget {
       if (p.discoveryID === this.discoveryID) return;
 
       const uuid = extractDiscUUID(p.discoveryID);
+
+      // Dedup: if we already have an entry for this same public key, remove the older one
+      // so a device that reconnected with a new disc ID doesn't appear twice.
+      if (p.publicKey) {
+        const staleKey = Object.keys(newRegistry).find(did =>
+          did !== p.discoveryID && !newRegistry[did].isMe && !!newRegistry[did].publicKey && newRegistry[did].publicKey === p.publicKey
+        );
+        if (staleKey) delete newRegistry[staleKey];
+      }
 
       // Public key match takes priority over discoveryUUID
       const knownPID = Object.keys(this.contacts).find((pid) => {
@@ -1109,9 +1180,23 @@ export class P2PManager extends EventTarget {
         this.chats[pid].push(msg);
         saveChats(this.chats);
         delete this.incomingFiles[d.tid];
+        // Acknowledge receipt so sender gets delivery checkmark
+        if (conn.open) conn.send({ type: 'file-ack', tid: d.tid });
         this.log(`File received: ${f.name}`, 'ok');
         this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
       });
+    }
+
+    if (d.type === 'file-ack') {
+      const msgs = this.chats[pid];
+      if (msgs) {
+        const msg = msgs.find(m => m.tid === d.tid && m.dir === 'sent');
+        if (msg) {
+          msg.status = 'delivered';
+          saveChats(this.chats);
+          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
+        }
+      }
     }
   }
 
@@ -1251,7 +1336,7 @@ export class P2PManager extends EventTarget {
       await saveFile(tid, blob, file.name, Date.now());
 
       if (!this.chats[pid]) this.chats[pid] = [];
-      const msg: ChatMessage = { id: crypto.randomUUID(), dir: 'sent', type: 'file', name: file.name, tid, size: file.size, ts: Date.now() };
+      const msg: ChatMessage = { id: crypto.randomUUID(), dir: 'sent', type: 'file', name: file.name, tid, size: file.size, ts: Date.now(), status: 'sent' };
       this.chats[pid].push(msg);
       saveChats(this.chats);
       this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));

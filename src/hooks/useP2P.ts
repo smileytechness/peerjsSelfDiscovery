@@ -12,6 +12,9 @@ export function useP2P() {
     namespaceLevel: 0,
     pubkeyFingerprint: '',
     persConnected: false,
+    signalingState: 'offline' as 'connected' | 'reconnecting' | 'offline',
+    lastSignalingTs: 0,
+    reconnectAttempt: 0,
   });
   const [peers, setPeers] = useState<Record<string, Contact>>({});
   const [registry, setRegistry] = useState<Record<string, PeerInfo>>({});
@@ -54,6 +57,9 @@ export function useP2P() {
       namespaceLevel: p2p.namespaceLevel,
       pubkeyFingerprint: p2p.pubkeyFingerprint,
       persConnected: p2p.persConnected,
+      signalingState: p2p.signalingState,
+      lastSignalingTs: p2p.lastSignalingTs,
+      reconnectAttempt: 0,
     });
 
     return () => {
