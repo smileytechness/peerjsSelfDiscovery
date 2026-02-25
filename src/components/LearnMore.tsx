@@ -85,7 +85,7 @@ export function LearnMore({ onClose }: LearnMoreProps) {
           <section className="border-t border-gray-800 pt-4 pb-1">
             <div className="flex flex-col gap-2">
               <a
-                href="https://github.com/smileytechness/peerjsSelfDiscovery"
+                href="https://github.com/smileytechness/peerns"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 text-blue-400 hover:text-blue-300 text-[12px] font-medium transition-colors"
