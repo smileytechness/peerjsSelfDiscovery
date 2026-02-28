@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="24" fill="#2563eb"/>
+  <g fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round">
+    <!-- left node -->
+    <circle cx="38" cy="64" r="12" fill="#fff" fill-opacity="0.15" stroke="#fff"/>
+    <!-- right node -->
+    <circle cx="90" cy="64" r="12" fill="#fff" fill-opacity="0.15" stroke="#fff"/>
+    <!-- connection line -->
+    <line x1="50" y1="64" x2="78" y2="64" stroke-dasharray="6 4"/>
+    <!-- signal arcs left -->
+    <path d="M28 48 a20 20 0 0 0 0 32" stroke-opacity="0.5"/>
+    <path d="M20 40 a30 30 0 0 0 0 48" stroke-opacity="0.3"/>
+    <!-- signal arcs right -->
+    <path d="M100 48 a20 20 0 0 1 0 32" stroke-opacity="0.5"/>
+    <path d="M108 40 a30 30 0 0 1 0 48" stroke-opacity="0.3"/>
+  </g>
+</svg>

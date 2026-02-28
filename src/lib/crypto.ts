@@ -190,6 +190,75 @@ export async function decryptMessage(
   return new TextDecoder().decode(decrypted);
 }
 
+// ─── Group Key Management ───────────────────────────────────────────────────
+
+/** Generate a random AES-256-GCM key for group encryption */
+export async function generateGroupKey(): Promise<CryptoKey> {
+  return window.crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/** Export group key to base64 for persistence */
+export async function exportGroupKey(key: CryptoKey): Promise<string> {
+  const raw = await window.crypto.subtle.exportKey('raw', key);
+  return arrayBufferToBase64(raw);
+}
+
+/** Import group key from base64 */
+export async function importGroupKey(base64: string): Promise<CryptoKey> {
+  const raw = base64ToArrayBuffer(base64);
+  return window.crypto.subtle.importKey(
+    'raw',
+    raw,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/** Encrypt a group key for pairwise distribution using a shared ECDH key */
+export async function encryptGroupKeyForPeer(
+  groupKey: CryptoKey,
+  pairwiseKey: CryptoKey
+): Promise<{ iv: string; ct: string }> {
+  const raw = await window.crypto.subtle.exportKey('raw', groupKey);
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const ct = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    pairwiseKey,
+    raw
+  );
+  return {
+    iv: arrayBufferToBase64(iv.buffer),
+    ct: arrayBufferToBase64(ct),
+  };
+}
+
+/** Decrypt a received group key using pairwise ECDH key */
+export async function decryptGroupKeyFromPeer(
+  pairwiseKey: CryptoKey,
+  iv: string,
+  ct: string
+): Promise<CryptoKey> {
+  const ivBuf = base64ToArrayBuffer(iv);
+  const ctBuf = base64ToArrayBuffer(ct);
+  const raw = await window.crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: ivBuf },
+    pairwiseKey,
+    ctBuf
+  );
+  return window.crypto.subtle.importKey(
+    'raw',
+    raw,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+}
+
 // ─── Rendezvous ─────────────────────────────────────────────────────────────
 
 /** Derive a time-rotating rendezvous slug from a shared AES key.

@@ -12,6 +12,7 @@ import {
   NSConfig,
   RVZ_WINDOW,
   RVZ_SWEEP_IV,
+  GroupCallInfo,
 } from './types';
 import {
   makeRouterID,
@@ -50,52 +51,64 @@ import {
   arrayBufferToBase64,
   deriveRendezvousSlug,
 } from './crypto';
+import { NSState, CNSState, GroupNSState, GeoNSState, makeNSState } from './p2p-types';
 
-// ─── Internal namespace state ─────────────────────────────────────────────────
-
-interface NSState {
-  isRouter: boolean;
-  level: number;
-  registry: Record<string, PeerInfo>;
-  routerPeer: Peer | null;
-  routerConn: DataConnection | null;
-  discPeer: Peer | null;
-  pingTimer: any;
-  monitorTimer: any;
-  peerSlotPeer: Peer | null;
-  peerSlotTimer: any;
-  peerSlotProbeTimer: any;
-  joinTimeout: any;
-  joinStatus: 'joining' | 'peer-slot' | null;
-  joinAttempt: number;
-}
-
-interface CNSState extends NSState {
-  name: string;
-  slug: string;
-  offline: boolean;
-  advanced?: boolean;
-  cfg: NSConfig;
-}
-
-function makeNSState(): NSState {
-  return {
-    isRouter: false,
-    level: 0,
-    registry: {},
-    routerPeer: null,
-    routerConn: null,
-    discPeer: null,
-    pingTimer: null,
-    monitorTimer: null,
-    peerSlotPeer: null,
-    peerSlotTimer: null,
-    peerSlotProbeTimer: null,
-    joinTimeout: null,
-    joinStatus: null,
-    joinAttempt: 0,
-  };
-}
+import {
+  nsEmit as _nsEmit, nsAttempt as _nsAttempt, nsTryJoin as _nsTryJoin,
+  nsHandleRouterConn as _nsHandleRouterConn, nsBroadcast as _nsBroadcast,
+  nsMergeRegistry as _nsMergeRegistry, nsStartPingTimer as _nsStartPingTimer,
+  nsRegisterDisc as _nsRegisterDisc, nsStartMonitor as _nsStartMonitor,
+  nsClearMonitor as _nsClearMonitor, nsProbeLevel1 as _nsProbeLevel1,
+  nsBroadcastMigration as _nsBroadcastMigration, nsMigrate as _nsMigrate,
+  nsFailover as _nsFailover, nsTeardown as _nsTeardown,
+  nsTryPeerSlot as _nsTryPeerSlot, nsStartPeerSlotProbe as _nsStartPeerSlotProbe,
+  nsProbePeerSlot as _nsProbePeerSlot,
+} from './p2p-ns';
+import {
+  rvzStart as _rvzStart, rvzSweep as _rvzSweep, rvzProcessNext as _rvzProcessNext,
+  rvzOnWindowExpire as _rvzOnWindowExpire, rvzCleanupActive as _rvzCleanupActive,
+  rvzTeardown as _rvzTeardown, rvzCheckRegistry as _rvzCheckRegistry,
+  rvzHandleExchange as _rvzHandleExchange, rvzEnqueue as _rvzEnqueue,
+  rvzContactConnected as _rvzContactConnected,
+} from './p2p-rvz';
+import {
+  handlePersistentData as _handlePersistentData, flushMessageQueue as _flushMessageQueue,
+  markWaitingMessagesFailed as _markWaitingMessagesFailed,
+  resetUnackedMessages as _resetUnackedMessages, resetContactMessages as _resetContactMessages,
+  sendEncryptedMessage as _sendEncryptedMessage, _sendFileNow as __sendFileNow,
+} from './p2p-messaging';
+import {
+  registerPersistent as _registerPersistent, schedulePersReconnect as _schedulePersReconnect,
+  handleOnline as _handleOnline, reconnectOfflineContacts as _reconnectOfflineContacts,
+  startHeartbeat as _startHeartbeat, startCheckinTimer as _startCheckinTimer,
+  watchNetwork as _watchNetwork, startKeepAlive as _startKeepAlive,
+  acquireWakeLock as _acquireWakeLock, handleNetworkChange as _handleNetworkChange,
+  notify as _notify, startContactSweep as _startContactSweep,
+} from './p2p-signaling';
+import {
+  requestConnect as _requestConnect, handleDiscData as _handleDiscData,
+  handleHandshakeData as _handleHandshakeData, connectPersistent as _connectPersistent,
+} from './p2p-handshake';
+import {
+  groupCreate as _groupCreate, groupJoin as _groupJoin, groupJoinBySlug as _groupJoinBySlug,
+  groupLeave as _groupLeave, groupSendMessage as _groupSendMessage,
+  groupEditMessage as _groupEditMessage, groupDeleteMessage as _groupDeleteMessage,
+  groupRetryMessage as _groupRetryMessage, groupSendFile as _groupSendFile,
+  groupInvite as _groupInvite, groupHandleInvite as _groupHandleInvite,
+  groupHandleNSData as _groupHandleNSData, groupSendCheckin as _groupSendCheckin,
+  groupSave as _groupSave, groupRestore as _groupRestore, groupEmit as _groupEmit,
+  groupKickMember as _groupKickMember,
+  groupCallStart as _groupCallStart,
+  groupCallJoin as _groupCallJoin,
+  groupCallLeave as _groupCallLeave,
+  groupCallAutoAnswer as _groupCallAutoAnswer,
+  groupCallToggleCamera as _groupCallToggleCamera,
+  groupCallToggleScreen as _groupCallToggleScreen,
+} from './p2p-group';
+import {
+  geoStart as _geoStart, geoStop as _geoStop, geoRefresh as _geoRefresh,
+  geoUpdatePosition as _geoUpdatePosition, geoGetNearbyPeers as _geoGetNearbyPeers,
+} from './p2p-geo';
 
 // ─── P2PManager ───────────────────────────────────────────────────────────────
 
@@ -111,47 +124,81 @@ export class P2PManager extends EventTarget {
   public chats: Record<string, ChatMessage[]> = {};
 
   // Public IP namespace state (shared NSState)
-  private publicNS: NSState = makeNSState();
+  /** @internal */ public publicNS: NSState = makeNSState();
 
-  private persPeer: Peer | null = null;
+  /** @internal */ public persPeer: Peer | null = null;
 
   public persConnected: boolean = false;
   public signalingState: 'connected' | 'reconnecting' | 'offline' = 'offline';
   public lastSignalingTs: number = 0;
-  private heartbeatTimer: any = null;
-  private connectingPIDs: Set<string> = new Set();
-  private connectFailures: Record<string, number> = {};
-  private readonly MAX_CONNECT_RETRIES = 3;
+  /** @internal */ public heartbeatTimer: any = null;
+  /** @internal */ public checkinTimer: any = null;
+  /** @internal */ public connectingPIDs: Set<string> = new Set();
+  /** @internal */ public connectFailures: Record<string, number> = {};
+  public readonly MAX_CONNECT_RETRIES = 3;
   public offlineMode: boolean = false;
   public namespaceOffline: boolean = false;
-  private readonly MAX_NAMESPACE = 5;
-  private readonly MAX_JOIN_ATTEMPTS = 3;
-  private incomingFiles: Record<string, FileTransfer> = {};
-  private pendingFiles: Record<string, File[]> = {};
+  public readonly MAX_NAMESPACE = 5;
+  public readonly MAX_JOIN_ATTEMPTS = 3;
+  /** @internal */ public incomingFiles: Record<string, FileTransfer> = {};
+  /** @internal */ public pendingFiles: Record<string, File[]> = {};
 
   // ─── Custom Namespaces ─────────────────────────────────────────────────────
-  private cns: Map<string, CNSState> = new Map();
+  /** @internal */ public cns: Map<string, CNSState> = new Map();
 
-  private privateKey: CryptoKey | null = null;
-  private publicKey: CryptoKey | null = null;
-  private ecdhPrivateKey: CryptoKey | null = null;
+  // ─── Group Chats ────────────────────────────────────────────────────────────
+  /** @internal */ public groups: Map<string, GroupNSState> = new Map();
+
+  // ─── Geo Discovery ──────────────────────────────────────────────────────────
+  /** @internal */ public geoStates: GeoNSState[] = [];
+  /** @internal */ public geoWatchId: number | null = null;
+  public geoRefreshing = false;
+  public geoLat: number | null = null;
+  public geoLng: number | null = null;
+  /** Cache of publicKey → fingerprint for geo peers */
+  /** @internal */ public geoFPCache: Map<string, string> = new Map();
+
+  // ─── Group Calls ──────────────────────────────────────────────────────────
+  public activeGroupCallId: string | null = null;
+  /** @internal */ public groupCallLocalStream: MediaStream | null = null;
+  /** @internal */ public groupCallCameraStream: MediaStream | null = null;
+  /** @internal */ public groupCallMediaConns: Map<string, MediaConnection> = new Map(); // fp → MediaConnection
+  /** @internal */ public groupCallRemoteStreams: Map<string, MediaStream> = new Map(); // fp → remote stream
+  public groupCallKind: 'audio' | 'video' | 'screen' = 'audio';
+
+  /** @internal */ public privateKey: CryptoKey | null = null;
+  /** @internal */ public publicKey: CryptoKey | null = null;
+  /** @internal */ public ecdhPrivateKey: CryptoKey | null = null;
   public publicKeyStr: string = '';
   public readonly signalingServer = '0.peerjs.com';
-  // Runtime shared key cache: pid → { key, fingerprint }
-  private sharedKeys: Map<string, { key: CryptoKey; fingerprint: string }> = new Map();
+  // Runtime shared key cache: contactKey → { key, fingerprint }
+  /** @internal */ public sharedKeys: Map<string, { key: CryptoKey; fingerprint: string }> = new Map();
 
-  // ─── Rendezvous Fallback ──────────────────────────────────────────────────
-  private rvzQueue: string[] = [];         // PIDs needing rendezvous
-  private rvzActive: string | null = null; // PID currently in rendezvous
-  private rvzState: NSState | null = null; // Current rendezvous NSState
-  private rvzCfg: NSConfig | null = null;  // Current rendezvous NSConfig
-  private rvzSweepTimer: any = null;       // 5-min sweep timer
-  private rvzWindowTimer: any = null;      // Time-window expiry timer
-  private rvzInitTimer: any = null;        // Initial delayed sweep
+  // PID → fingerprint reverse lookup (for when PeerJS gives us a PID)
+  /** @internal */ public pidToFP: Map<string, string> = new Map();
 
-  private initPromise: Promise<void> | null = null;
-  private wakeLock: any = null;
-  private keepAliveTimer: any = null;
+  // ─── Rendezvous — parallel per-contact discovery namespaces ───────────────
+  /** Active rvz namespaces keyed by contactKey */
+  /** @internal */ public rvzMap: Map<string, { state: NSState; cfg: NSConfig; windowTimer: any }> = new Map();
+  /** @internal */ public rvzSweepTimer: any = null;
+  /** @internal */ public rvzInitTimer: any = null;
+  // Legacy fields kept for backward compat with nsMergeRegistry check
+  /** @internal */ public rvzQueue: string[] = [];
+  /** @internal */ public rvzActive: string | null = null;
+  /** @internal */ public rvzState: NSState | null = null;
+  /** @internal */ public rvzCfg: NSConfig | null = null;
+  /** @internal */ public rvzWindowTimer: any = null;
+
+  /** @internal */ public initPromise: Promise<void> | null = null;
+  /** @internal */ public wakeLock: any = null;
+  /** @internal */ public keepAliveTimer: any = null;
+  /** @internal */ public contactSweepTimer: any = null;
+
+  // Cached PID history (avoids parsing localStorage on every emitStatus call)
+  /** @internal */ public pidHistory: string[] = [];
+  /** @internal */ public loadPidHistory() {
+    try { this.pidHistory = JSON.parse(localStorage.getItem(`${APP_PREFIX}-pid-history`) || '[]'); } catch { this.pidHistory = []; }
+  }
 
   // ─── Backward-compatible getters ───────────────────────────────────────────
   get isRouter() { return this.publicNS.isRouter; }
@@ -169,7 +216,7 @@ export class P2PManager extends EventTarget {
     };
   }
 
-  private makeCNSConfig(s: { name: string; slug: string; advanced?: boolean }): NSConfig {
+  /** @internal */ public makeCNSConfig(s: { name: string; slug: string; advanced?: boolean }): NSConfig {
     const slug = s.slug;
     if (s.advanced) {
       return {
@@ -191,12 +238,12 @@ export class P2PManager extends EventTarget {
 
   /** Derive (or retrieve cached) shared AES key for a contact. Returns null if
    *  our ECDH key or their public key is unavailable. */
-  private async getOrDeriveSharedKey(pid: string): Promise<{ key: CryptoKey; fingerprint: string } | null> {
+  /** @internal */ public async getOrDeriveSharedKey(contactKey: string): Promise<{ key: CryptoKey; fingerprint: string } | null> {
     if (!this.ecdhPrivateKey) return null;
-    const c = this.contacts[pid];
+    const c = this.contacts[contactKey];
     if (!c?.publicKey) return null;
 
-    const cached = this.sharedKeys.get(pid);
+    const cached = this.sharedKeys.get(contactKey);
     if (cached) return cached;
 
     try {
@@ -204,7 +251,10 @@ export class P2PManager extends EventTarget {
       const key = await deriveSharedKey(this.ecdhPrivateKey, theirECDH);
       const fingerprint = await fingerprintSharedKey(key);
       const entry = { key, fingerprint };
-      this.sharedKeys.set(pid, entry);
+      this.sharedKeys.set(contactKey, entry);
+      // Persist shared key fingerprint on contact
+      c.sharedKeyFingerprint = fingerprint;
+      saveContacts(this.contacts);
       this.log(`Shared key derived for ${c.friendlyName}: ${fingerprint}`, 'ok');
       return entry;
     } catch (e) {
@@ -214,21 +264,21 @@ export class P2PManager extends EventTarget {
   }
 
   /** Public accessor: get shared key fingerprint for a contact (for UI display) */
-  public getSharedKeyFingerprint(pid: string): string | null {
-    return this.sharedKeys.get(pid)?.fingerprint ?? null;
+  public getSharedKeyFingerprint(contactKey: string): string | null {
+    return this.sharedKeys.get(contactKey)?.fingerprint ?? this.contacts[contactKey]?.sharedKeyFingerprint ?? null;
   }
 
   /** Export raw shared AES key as base64 (for UI display) */
-  public async getSharedKeyExport(pid: string): Promise<string | null> {
-    const entry = this.sharedKeys.get(pid);
+  public async getSharedKeyExport(contactKey: string): Promise<string | null> {
+    const entry = this.sharedKeys.get(contactKey);
     if (!entry) return null;
     const raw = await window.crypto.subtle.exportKey('raw', entry.key);
     return arrayBufferToBase64(raw);
   }
 
   /** Invalidate cached shared key (e.g. if contact's public key changes — shouldn't happen) */
-  private clearSharedKey(pid: string) {
-    this.sharedKeys.delete(pid);
+  /** @internal */ public clearSharedKey(contactKey: string) {
+    this.sharedKeys.delete(contactKey);
   }
 
   constructor() {
@@ -238,9 +288,21 @@ export class P2PManager extends EventTarget {
   private async loadState() {
     this.contacts = loadContacts();
     this.chats = loadChats();
+    this.loadPidHistory();
     this.friendlyName = localStorage.getItem(`${APP_PREFIX}-name`) || '';
     this.persistentID = localStorage.getItem(`${APP_PREFIX}-pid`) || '';
     this.discoveryUUID = localStorage.getItem(`${APP_PREFIX}-disc-uuid`) || '';
+
+    // ── Migration: PID-keyed → fingerprint-keyed contacts ──────────────────
+    await this.migrateToFingerprintKeys();
+
+    // Build pidToFP map from loaded contacts
+    for (const [key, c] of Object.entries(this.contacts)) {
+      if (c.fingerprint && c.currentPID) {
+        this.pidToFP.set(c.currentPID, key);
+        c.knownPIDs?.forEach(pid => this.pidToFP.set(pid, key));
+      }
+    }
 
     if (!this.persistentID) {
       this.persistentID = `${APP_PREFIX}-${crypto.randomUUID().replace(/-/g, '')}`;
@@ -276,6 +338,64 @@ export class P2PManager extends EventTarget {
     }
   }
 
+  /** One-time migration: rekey PID-keyed contacts/chats to fingerprint keys */
+  private async migrateToFingerprintKeys() {
+    if (localStorage.getItem(`${APP_PREFIX}-fp-migrated`)) return;
+    const oldContacts = { ...this.contacts };
+    const oldChats = { ...this.chats };
+    let migrated = false;
+
+    for (const [pid, c] of Object.entries(oldContacts)) {
+      // Already fingerprint-keyed if it doesn't look like a PID
+      if (!pid.startsWith(`${APP_PREFIX}-`) && !pid.startsWith('peerns-')) continue;
+      if (c.fingerprint) continue; // Already has fingerprint (somehow)
+      if (!c.publicKey) {
+        // No pubkey — keep as PID key (pending contact)
+        (c as any).currentPID = pid;
+        continue;
+      }
+
+      const fp = await this.computeFingerprint(c.publicKey);
+      if (!fp) continue;
+
+      // Rekey contact
+      const newContact = { ...c, fingerprint: fp, currentPID: pid, knownPIDs: [pid] };
+      delete this.contacts[pid];
+      this.contacts[fp] = newContact;
+
+      // Rekey chats
+      if (oldChats[pid]) {
+        if (!this.chats[fp]) {
+          this.chats[fp] = oldChats[pid];
+        } else {
+          const existingIds = new Set(this.chats[fp].map(m => m.id));
+          const newMsgs = oldChats[pid].filter(m => !existingIds.has(m.id));
+          this.chats[fp] = [...this.chats[fp], ...newMsgs].sort((a, b) => a.ts - b.ts);
+        }
+        delete this.chats[pid];
+      }
+
+      // Migrate lastRead
+      try {
+        const lr = JSON.parse(localStorage.getItem(`${APP_PREFIX}-lastread`) || '{}');
+        if (lr[pid]) {
+          lr[fp] = lr[pid];
+          delete lr[pid];
+          localStorage.setItem(`${APP_PREFIX}-lastread`, JSON.stringify(lr));
+        }
+      } catch {}
+
+      this.log(`Migration: ${pid.slice(-8)} → fp:${fp}`, 'info');
+      migrated = true;
+    }
+
+    if (migrated) {
+      saveContacts(this.contacts);
+      saveChats(this.chats);
+    }
+    localStorage.setItem(`${APP_PREFIX}-fp-migrated`, '1');
+  }
+
   private async generateAndSaveKeys() {
     this.log('Generating new identity keys...', 'info');
     const pair = await generateKeyPair();
@@ -300,6 +420,26 @@ export class P2PManager extends EventTarget {
     } catch {
       return '';
     }
+  }
+
+  /** Look up a contact by PeerJS ID. Returns fingerprint key + contact if found. */
+  public contactByPID(pid: string): { fp: string; contact: Contact } | null {
+    const fp = this.pidToFP.get(pid);
+    return fp && this.contacts[fp] ? { fp, contact: this.contacts[fp] } : null;
+  }
+
+  /** Get the contacts/chats key for a PeerJS ID: fingerprint if known, PID as fallback. */
+  public contactKeyForPID(pid: string): string {
+    const mapped = this.pidToFP.get(pid);
+    if (mapped) return mapped;
+    // Fallback: search contacts by currentPID or knownPIDs
+    for (const [key, c] of Object.entries(this.contacts)) {
+      if (c.currentPID === pid || c.knownPIDs?.includes(pid)) {
+        this.pidToFP.set(pid, key); // cache for future
+        return key;
+      }
+    }
+    return pid;
   }
 
   public init(name: string) {
@@ -333,101 +473,50 @@ export class P2PManager extends EventTarget {
     this.registerPersistent();
     this.watchNetwork();
     this.startHeartbeat();
+    this.startCheckinTimer();
+    this.startContactSweep();
     // Request notification permission early so we can notify when backgrounded
     this.requestNotificationPermission();
+
+    // Restore custom namespaces immediately (don't wait for IP detection)
+    this.cnsRestoreSaved();
+    // Restore group chats
+    this.groupRestore();
+
+    if (savedNsOffline) {
+      // Public IP namespace was paused — skip network detection entirely
+      this.namespaceOffline = true;
+      this.log('Public IP namespace paused from previous session — skipping network detection', 'info');
+      this.rvzStart();
+      this.emitStatus();
+      return;
+    }
+
+    this.emitStatus();
 
     this.publicIP = (await getPublicIP()) || '';
     if (!this.publicIP) {
       this.log('Could not detect public IP — manual connect still works', 'err');
+      this.rvzStart();
       this.emitStatus();
       return;
     }
 
     this.log(`Public IP: ${this.publicIP}`, 'ok');
     this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
-
-    if (savedNsOffline) {
-      this.namespaceOffline = true;
-      this.log('Restored namespace offline from previous session', 'info');
-    } else {
-      this.attemptNamespace(1);
-    }
-    this.cnsRestoreSaved();
+    this.attemptNamespace(1);
     this.rvzStart();
 
     this.emitStatus();
   }
 
-  private watchNetwork() {
-    const nc = (navigator as any).connection;
-    if (nc) {
-      nc.addEventListener('change', () => this.handleNetworkChange());
-    }
-
-    window.addEventListener('online', () => {
-      this.log('Browser online event', 'info');
-      this.handleOnline();
-    });
-    window.addEventListener('offline', () => {
-      this.log('Browser offline event', 'err');
-      this.persConnected = false;
-      this.emitStatus();
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        this.log('App foregrounded — checking connections', 'info');
-        this.handleOnline();
-        this.acquireWakeLock();
-      }
-    });
-
-    this.startKeepAlive();
-  }
+  /** @internal */ public watchNetwork() { _watchNetwork(this); }
 
   // ─── Keep-alive: prevent browser from suspending the page ──────────────
 
-  private startKeepAlive() {
-    // Web Lock API — prevents browser from freezing the page when backgrounded.
-    // The lock is held as long as the promise is pending (forever until page closes).
-    if (navigator.locks) {
-      navigator.locks.request(`${APP_PREFIX}-keepalive`, () => {
-        this.log('Web Lock acquired — page will stay alive in background', 'ok');
-        return new Promise(() => {}); // never resolves — holds the lock
-      }).catch(() => {});
-    }
+  /** @internal */ public startKeepAlive() { _startKeepAlive(this); }
 
-    // Wake Lock API — prevents screen from sleeping (released when hidden, reacquired on visible)
-    this.acquireWakeLock();
-
-    // Periodic signaling ping — re-registers with PeerJS server if connection drifted.
-    // Mobile browsers may let WebSocket idle-timeout; this forces activity every 45s.
-    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
-    this.keepAliveTimer = setInterval(() => {
-      if (this.offlineMode) return;
-      if (this.persPeer && !this.persPeer.destroyed && !this.persPeer.disconnected) {
-        // PeerJS socket is alive — send a lightweight probe to keep it active.
-        // persPeer.socket is internal but we can trigger activity via a self-check.
-        const sock = (this.persPeer as any).socket;
-        if (sock && typeof sock.send === 'function') {
-          try { sock.send({ type: 'HEARTBEAT' }); } catch {}
-        }
-      } else if (this.persPeer?.disconnected && !this.reconnectScheduled) {
-        this.log('Keep-alive: signaling drifted — reconnecting', 'info');
-        this.schedulePersReconnect();
-      }
-    }, 45000);
-  }
-
-  private async acquireWakeLock() {
-    if (!('wakeLock' in navigator)) return;
-    // Only acquire when page is visible (API requirement)
-    if (document.visibilityState !== 'visible') return;
-    try {
-      this.wakeLock = await (navigator as any).wakeLock.request('screen');
-      this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
-    } catch {}
-  }
+  /** @internal */ public async acquireWakeLock() { _acquireWakeLock(this); }
 
   /** Request notification permission (needed for background awareness on mobile PWAs) */
   public async requestNotificationPermission(): Promise<boolean> {
@@ -441,108 +530,11 @@ export class P2PManager extends EventTarget {
 
   /** Show a browser notification. Always fires when permission granted — the in-app
    *  toast system separately handles suppression for the active chat. */
-  private async notify(title: string, body: string, tag?: string) {
-    if (!('Notification' in window)) return;
-    if (Notification.permission !== 'granted') return;
-    // Don't notify if user is actively viewing the app
-    if (document.visibilityState === 'visible' && document.hasFocus()) return;
+  /** @internal */ public async notify(title: string, body: string, tag?: string) { _notify(this, title, body, tag); }
 
-    const opts: NotificationOptions = {
-      body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
-      tag: tag || `${APP_PREFIX}-${Date.now()}`,
-      renotify: !!tag,
-    };
+  /** @internal */ public async handleNetworkChange() { _handleNetworkChange(this); }
 
-    // Prefer Service Worker notifications (required on Android Chrome / mobile PWAs)
-    if ('serviceWorker' in navigator) {
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        await reg.showNotification(title, opts);
-        return;
-      } catch (e) {
-        this.log(`SW notification failed, falling back: ${e}`, 'err');
-      }
-    }
-
-    // Fallback: direct Notification API (desktop browsers)
-    try {
-      const n = new Notification(title, opts);
-      setTimeout(() => n.close(), 6000);
-      n.onclick = () => {
-        window.focus();
-        n.close();
-      };
-    } catch (e) {
-      this.log(`Notification failed: ${e}`, 'err');
-    }
-  }
-
-  private async handleNetworkChange() {
-    if (this.offlineMode) return;
-    const nc = (navigator as any).connection;
-    const type = nc?.type || nc?.effectiveType || 'unknown';
-    this.log(`Network type changed → ${type}`, 'info');
-
-    // Invalidate all contact DataConnections — they're dead after network change
-    Object.keys(this.contacts).forEach(pid => {
-      if (this.contacts[pid].conn) {
-        try { this.contacts[pid].conn.close(); } catch {}
-        this.contacts[pid].conn = null;
-      }
-    });
-    this.resetUnackedMessages();
-    this.emitPeerListUpdate();
-
-    if (this.persPeer && !this.persPeer.destroyed) {
-      this.reconnectBackoff = 0;
-      this.signalingState = 'reconnecting';
-      this.emitStatus();
-      try {
-        if (!this.persPeer.disconnected) this.persPeer.disconnect();
-        this.persPeer.reconnect();
-      } catch {
-        this.persPeer.destroy();
-        this.persPeer = null;
-        this.registerPersistent();
-      }
-    } else {
-      this.handleOnline();
-    }
-
-    if (!this.publicIP) return;
-
-    const newIP = await getPublicIP();
-    if (!newIP) {
-      this.log('IP undetectable after network change', 'err');
-      return;
-    }
-    if (newIP !== this.publicIP) {
-      this.log(`IP changed ${this.publicIP} → ${newIP} — refailing discovery`, 'info');
-      this.publicIP = newIP;
-      this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
-      this.emitStatus();
-      this.failover();
-    } else {
-      this.log('Same IP — rejoining discovery', 'ok');
-      if (!this.publicNS.isRouter && (!this.publicNS.routerConn || !this.publicNS.routerConn.open)) {
-        this.tryJoinNamespace(this.publicNS.level || 1);
-      }
-    }
-
-    // Restart non-offline custom namespaces
-    this.cns.forEach((s) => {
-      if (s.offline) return;
-      this.nsTeardown(s);
-      s.level = 0; s.isRouter = false;
-      const myEntry = Object.values(s.registry).find(r => r.isMe);
-      s.registry = myEntry ? { [myEntry.discoveryID]: myEntry } : {};
-      setTimeout(() => this.nsAttempt(s, s.cfg, 1), Math.random() * 3000);
-    });
-  }
-
-  private emitStatus() {
+  /** @internal */ public emitStatus() {
     const level = this.publicNS.level;
     const roleLabel = level > 0
       ? (this.publicNS.isRouter ? `Router L${level}` : `Peer L${level}`)
@@ -564,77 +556,22 @@ export class P2PManager extends EventTarget {
           reconnectAttempt: this.reconnectBackoff,
           joinStatus: this.publicNS.joinStatus,
           joinAttempt: this.publicNS.joinAttempt,
+          pidHistory: this.pidHistory,
         },
       })
     );
   }
 
-  private log(msg: string, type: string = 'info') {
+  /** @internal */ public log(msg: string, type: string = 'info') {
     console.log(`[P2P:${type}] ${msg}`);
     this.dispatchEvent(new CustomEvent('log', { detail: { msg, type } }));
   }
 
-  private registerPersistent() {
-    if (this.persPeer && !this.persPeer.destroyed) return;
+  /** @internal */ public registerPersistent() { _registerPersistent(this); }
 
-    this.persPeer = new Peer(this.persistentID);
-
-    this.persPeer.on('open', (id) => {
-      this.persConnected = true;
-      this.signalingState = 'connected';
-      this.lastSignalingTs = Date.now();
-      this.reconnectBackoff = 0;
-      this.reconnectScheduled = false;
-      this.log(`Persistent ID registered: ${id}`, 'ok');
-      this.emitStatus();
-      this.reconnectOfflineContacts();
-    });
-
-    this.persPeer.on('disconnected', () => {
-      this.persConnected = false;
-      this.signalingState = 'reconnecting';
-      this.log('Persistent peer lost signaling connection — reconnecting...', 'err');
-      this.emitStatus();
-      this.schedulePersReconnect();
-    });
-
-    this.persPeer.on('close', () => {
-      this.persConnected = false;
-      this.log('Persistent peer closed — recreating...', 'err');
-      this.emitStatus();
-      this.persPeer = null;
-      setTimeout(() => this.registerPersistent(), 3000);
-    });
-
-    this.persPeer.on('connection', (conn) => {
-      conn.on('data', (d) => this.handlePersistentData(d, conn));
-      conn.on('close', () => {
-        const pid = Object.keys(this.contacts).find((k) => this.contacts[k].conn === conn);
-        if (pid) {
-          this.contacts[pid].conn = null;
-          this.emitPeerListUpdate();
-        }
-      });
-    });
-
-    this.persPeer.on('call', (call) => this.handleIncomingCall(call));
-    this.persPeer.on('error', (e: any) => {
-      // peer-unavailable errors bubble up from outgoing connect() calls (e.g. peer slot probes,
-      // contact reconnects) — they're expected and handled at the DataConnection level already.
-      if (e.type === 'peer-unavailable') return;
-      this.log(`Persistent peer error: ${e.type}`, 'err');
-      if (e.type === 'unavailable-id') {
-        this.log('Persistent ID claimed — generating new one', 'err');
-        this.persistentID = `${APP_PREFIX}-${crypto.randomUUID().replace(/-/g, '')}`;
-        localStorage.setItem(`${APP_PREFIX}-pid`, this.persistentID);
-        this.persPeer?.destroy();
-        this.persPeer = null;
-        setTimeout(() => this.registerPersistent(), 1000);
-      }
-    });
-  }
-
-  private reconnectBackoff = 0;
+  /** @internal */ public reconnectBackoff = 0;
+  /** @internal — retries with same PID before generating a new one on unavailable-id */
+  public unavailIdRetries = 0;
 
   public setOfflineMode(offline: boolean) {
     this.offlineMode = offline;
@@ -643,6 +580,16 @@ export class P2PManager extends EventTarget {
     if (offline) {
       this.setNamespaceOffline(true);
       this.rvzTeardown();
+      // Teardown all custom namespaces
+      this.cns.forEach((s) => { s.offline = true; this.nsTeardown(s); });
+      // Teardown all group namespaces
+      this.groups.forEach((s) => this.nsTeardown(s));
+      // Teardown all geo namespaces
+      this.geoStop();
+      if (this.checkinTimer) { clearInterval(this.checkinTimer); this.checkinTimer = null; }
+      if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+      if (this.keepAliveTimer) { clearInterval(this.keepAliveTimer); this.keepAliveTimer = null; }
+      if (this.contactSweepTimer) { clearInterval(this.contactSweepTimer); this.contactSweepTimer = null; }
       if (this.persPeer && !this.persPeer.destroyed && !this.persPeer.disconnected) {
         try { this.persPeer.disconnect(); } catch {}
       }
@@ -653,6 +600,23 @@ export class P2PManager extends EventTarget {
       this.namespaceOffline = false;
       localStorage.setItem(`${APP_PREFIX}-ns-offline`, '');
       this.signalingState = 'reconnecting';
+      this.startCheckinTimer();
+      this.startHeartbeat();
+      this.startKeepAlive();
+      this.startContactSweep();
+      // Restore custom namespaces
+      this.cns.forEach((s) => {
+        s.offline = false;
+        this.nsAttempt(s, s.cfg, 1);
+      });
+      // Restore group namespaces
+      let groupDelay = 0;
+      this.groups.forEach((s) => {
+        groupDelay += 1500;
+        setTimeout(() => this.nsAttempt(s, s.cfg, 1), groupDelay);
+      });
+      // Restart rendezvous discovery for offline contacts
+      this.rvzSweep();
       this.handleOnline();
     }
   }
@@ -681,130 +645,107 @@ export class P2PManager extends EventTarget {
       if (this.publicIP) {
         this.log('Rejoining namespace...', 'info');
         this.attemptNamespace(1);
+      } else {
+        // IP detection was skipped because namespace was paused on init — detect now
+        this.log('Detecting network for namespace rejoin...', 'info');
+        getPublicIP().then(ip => {
+          if (!ip) {
+            this.log('Could not detect public IP', 'err');
+            this.emitStatus();
+            return;
+          }
+          this.publicIP = ip;
+          this.discoveryID = makeDiscID(ip, this.discoveryUUID);
+          this.log(`Public IP: ${ip}`, 'ok');
+          this.attemptNamespace(1);
+          this.emitStatus();
+        });
       }
     }
   }
 
-  private findContactByPublicKey(publicKey: string, excludePID?: string): string | null {
+  /** @internal */ public findContactByPublicKey(publicKey: string, excludePID?: string): string | null {
     return Object.keys(this.contacts).find(
       k => k !== excludePID && !!this.contacts[k].publicKey && this.contacts[k].publicKey === publicKey
     ) ?? null;
   }
 
-  private migrateContact(oldPID: string, newPID: string) {
-    if (oldPID === newPID) return;
-    const existing = this.contacts[oldPID];
-    if (!this.contacts[newPID]) {
-      this.contacts[newPID] = { ...existing, conn: null };
+  /** @internal */ public migrateContact(oldKey: string, newKey: string) {
+    if (oldKey === newKey) return;
+    const existing = this.contacts[oldKey];
+    if (!existing) return;
+
+    if (!this.contacts[newKey]) {
+      this.contacts[newKey] = { ...existing, conn: null };
     } else {
       // Preserve fields from old contact that new one might lack
-      if (existing.publicKey && !this.contacts[newPID].publicKey) {
-        this.contacts[newPID].publicKey = existing.publicKey;
+      if (existing.publicKey && !this.contacts[newKey].publicKey) {
+        this.contacts[newKey].publicKey = existing.publicKey;
+      }
+      if (existing.fingerprint && !this.contacts[newKey].fingerprint) {
+        this.contacts[newKey].fingerprint = existing.fingerprint;
+      }
+      if (existing.currentPID) {
+        this.contacts[newKey].currentPID = existing.currentPID;
+      }
+      if (existing.knownPIDs) {
+        const known = new Set([...(this.contacts[newKey].knownPIDs || []), ...existing.knownPIDs]);
+        this.contacts[newKey].knownPIDs = [...known];
       }
     }
     // Merge chat histories (concatenate + deduplicate by id, sort by timestamp)
-    if (this.chats[oldPID]) {
-      if (!this.chats[newPID]) {
-        this.chats[newPID] = this.chats[oldPID];
+    if (this.chats[oldKey]) {
+      if (!this.chats[newKey]) {
+        this.chats[newKey] = this.chats[oldKey];
       } else {
-        const existingIds = new Set(this.chats[newPID].map(m => m.id));
-        const newMsgs = this.chats[oldPID].filter(m => !existingIds.has(m.id));
-        this.chats[newPID] = [...this.chats[newPID], ...newMsgs].sort((a, b) => a.ts - b.ts);
+        const existingIds = new Set(this.chats[newKey].map(m => m.id));
+        const newMsgs = this.chats[oldKey].filter(m => !existingIds.has(m.id));
+        this.chats[newKey] = [...this.chats[newKey], ...newMsgs].sort((a, b) => a.ts - b.ts);
       }
-      delete this.chats[oldPID];
+      delete this.chats[oldKey];
     }
     // Migrate shared key
-    const oldSK = this.sharedKeys.get(oldPID);
-    if (oldSK && !this.sharedKeys.has(newPID)) {
-      this.sharedKeys.set(newPID, oldSK);
+    const oldSK = this.sharedKeys.get(oldKey);
+    if (oldSK && !this.sharedKeys.has(newKey)) {
+      this.sharedKeys.set(newKey, oldSK);
     }
-    this.sharedKeys.delete(oldPID);
+    this.sharedKeys.delete(oldKey);
 
-    delete this.contacts[oldPID];
+    // Update pidToFP mappings and clean up stale connectFailures
+    if (this.contacts[newKey].fingerprint) {
+      const fp = this.contacts[newKey].fingerprint;
+      this.contacts[newKey].knownPIDs?.forEach(pid => {
+        this.pidToFP.set(pid, fp);
+        delete this.connectFailures[pid];
+      });
+      if (this.contacts[newKey].currentPID) {
+        this.pidToFP.set(this.contacts[newKey].currentPID, fp);
+        delete this.connectFailures[this.contacts[newKey].currentPID];
+      }
+    }
+
+    delete this.contacts[oldKey];
     saveContacts(this.contacts);
     saveChats(this.chats);
-    this.log(`Contact migrated: ${oldPID.slice(-8)} → ${newPID.slice(-8)}`, 'info');
+    this.log(`Contact migrated: ${oldKey.slice(-8)} → ${newKey.slice(-8)}`, 'info');
 
     // Notify UI to redirect activeChat if needed
-    this.dispatchEvent(new CustomEvent('contact-migrated', { detail: { oldPID, newPID } }));
+    this.dispatchEvent(new CustomEvent('contact-migrated', { detail: { oldPID: oldKey, newPID: newKey } }));
   }
 
-  private schedulePersReconnect() {
-    if (this.offlineMode || this.reconnectScheduled) return;
-    this.reconnectScheduled = true;
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectBackoff), 30000) + Math.random() * 1000;
-    this.reconnectBackoff = Math.min(this.reconnectBackoff + 1, 5);
-    this.log(`Scheduling reconnect in ${(delay / 1000).toFixed(1)}s (attempt ${this.reconnectBackoff})`, 'info');
-    setTimeout(() => {
-      this.reconnectScheduled = false;
-      if (!this.persPeer || this.persPeer.destroyed) {
-        this.persPeer = null;
-        this.registerPersistent();
-      } else if (this.persPeer.disconnected) {
-        try {
-          this.persPeer.reconnect();
-        } catch {
-          this.persPeer.destroy();
-          this.persPeer = null;
-          this.registerPersistent();
-        }
-      }
-    }, delay);
-  }
+  /** @internal */ public schedulePersReconnect() { _schedulePersReconnect(this); }
 
-  private handleOnline() {
-    if (this.offlineMode) return;
-    this.log('Connectivity change — checking persistent peer...', 'info');
-    if (!this.persPeer || this.persPeer.destroyed) {
-      this.persPeer = null;
-      this.registerPersistent();
-    } else if (this.persPeer.disconnected) {
-      this.reconnectBackoff = 0;
-      try {
-        this.persPeer.reconnect();
-      } catch {
-        this.persPeer.destroy();
-        this.persPeer = null;
-        this.registerPersistent();
-      }
-    }
-    if (this.publicIP && !this.namespaceOffline && !this.publicNS.isRouter && (!this.publicNS.routerConn || !this.publicNS.routerConn.open)) {
-      setTimeout(() => this.tryJoinNamespace(this.publicNS.level || 1), 1500);
-    }
-  }
+  /** @internal */ public async handleOnline() { _handleOnline(this); }
 
-  private reconnectOfflineContacts() {
-    if (!this.persPeer || this.persPeer.destroyed || this.persPeer.disconnected) return;
-    const pids = Object.keys(this.contacts).filter(
-      pid => !this.contacts[pid].conn?.open && !this.connectingPIDs.has(pid)
-    );
-    if (pids.length === 0) return;
-    this.log(`Reconnecting to ${pids.length} offline contact(s)...`, 'info');
-    pids.forEach(pid => {
-      if (this.contacts[pid].conn && !this.contacts[pid].conn.open) {
-        this.contacts[pid].conn = null;
-      }
-      this.connectPersistent(pid, this.contacts[pid].friendlyName);
-    });
-  }
+  /** @internal */ public reconnectOfflineContacts() { _reconnectOfflineContacts(this); }
 
-  private reconnectScheduled = false;
+  /** @internal */ public reconnectScheduled = false;
 
-  private startHeartbeat() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    this.heartbeatTimer = setInterval(() => {
-      if (this.offlineMode) return;
-      const connected = this.persPeer != null && !this.persPeer.destroyed && !this.persPeer.disconnected;
-      if (connected !== this.persConnected) {
-        this.persConnected = connected;
-        this.emitStatus();
-      }
-      if (!connected && this.persPeer && !this.persPeer.destroyed && !this.reconnectScheduled) {
-        this.log('Heartbeat: signaling lost — reconnecting', 'info');
-        this.schedulePersReconnect();
-      }
-    }, 20000);
-  }
+  /** @internal */ public startHeartbeat() { _startHeartbeat(this); }
+
+  /** @internal */ public startCheckinTimer() { _startCheckinTimer(this); }
+
+  /** @internal */ public startContactSweep() { _startContactSweep(this); }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ═══ Shared Namespace Routing Core (ns* methods) ═══════════════════════════
@@ -813,699 +754,56 @@ export class P2PManager extends EventTarget {
   // All namespace types (public IP, custom) use these methods.
   // They operate on an NSState object + NSConfig closures.
 
-  private nsEmit(s: NSState) {
-    this.emitPeerListUpdate();
-    if (s === this.publicNS) {
-      this.emitStatus();
-    } else {
-      this.dispatchEvent(new CustomEvent('custom-ns-update'));
-    }
-  }
+  /** @internal */ public nsEmit(s: NSState) { _nsEmit(this, s); }
 
-  private nsAttempt(s: NSState, cfg: NSConfig, level: number) {
-    if (s !== this.publicNS) {
-      const cs = s as CNSState;
-      if (cs.offline || this.offlineMode) return;
-    } else {
-      if (this.namespaceOffline) return;
-    }
-    if (!this.persPeer || this.persPeer.destroyed) return;
-    if (level > this.MAX_NAMESPACE) {
-      this.log(`[${cfg.label}] All namespace levels exhausted (1–${this.MAX_NAMESPACE}) — discovery offline`, 'err');
-      return;
-    }
+  /** @internal */ public nsAttempt(s: NSState, cfg: NSConfig, level: number) { _nsAttempt(this, s, cfg, level); }
 
-    const rid = cfg.makeRouterID(level);
-    this.log(`[${cfg.label}] Attempting router election at level ${level}: ${rid}`, 'info');
+  /** @internal */ public nsTryJoin(s: NSState, cfg: NSConfig, level: number, attempt: number = 0) { _nsTryJoin(this, s, cfg, level, attempt); }
 
-    if (s.routerPeer) { s.routerPeer.destroy(); s.routerPeer = null; }
+  /** @internal */ public nsHandleRouterConn(s: NSState, cfg: NSConfig, conn: DataConnection) { _nsHandleRouterConn(this, s, cfg, conn); }
 
-    s.routerPeer = new Peer(rid);
+  /** @internal */ public nsBroadcast(s: NSState, _cfg: NSConfig) { _nsBroadcast(this, s, _cfg); }
 
-    s.routerPeer.on('open', (id) => {
-      // For CNS: check if still in map
-      if (s !== this.publicNS) {
-        const cs = s as CNSState;
-        if (!this.cns.has(cs.slug)) { s.routerPeer?.destroy(); return; }
-      }
-      s.isRouter = true;
-      s.level = level;
-      s.joinStatus = null;
-      s.joinAttempt = 0;
-      this.log(`[${cfg.label}] Elected as router at level ${level}: ${id}`, 'ok');
-      s.routerPeer?.on('connection', (conn) => this.nsHandleRouterConn(s, cfg, conn));
-      this.nsStartPingTimer(s, cfg);
-      this.nsRegisterDisc(s, cfg);
-      // Start peer slot probe (router probes for EDM NAT peers)
-      this.nsStartPeerSlotProbe(s, cfg);
-      if (level > 1) {
-        this.nsStartMonitor(s, cfg);
-      }
-      this.nsEmit(s);
-    });
+  /** @internal */ public nsMergeRegistry(s: NSState, cfg: NSConfig, peers: any[]) { _nsMergeRegistry(this, s, cfg, peers); }
 
-    s.routerPeer.on('error', (e: any) => {
-      if (e.type === 'unavailable-id') {
-        this.log(`[${cfg.label}] Level ${level} router slot taken — trying to join`, 'info');
-        s.routerPeer = null;
-        this.nsTryJoin(s, cfg, level);
-      } else {
-        this.log(`[${cfg.label}] Router election error at level ${level}: ${e.type}`, 'err');
-      }
-    });
-  }
+  /** @internal */ public nsStartPingTimer(s: NSState, cfg: NSConfig) { _nsStartPingTimer(this, s, cfg); }
 
-  private nsTryJoin(s: NSState, cfg: NSConfig, level: number, attempt: number = 0) {
-    if (s !== this.publicNS) {
-      const cs = s as CNSState;
-      if (cs.offline || this.offlineMode) return;
-    }
-    if (!this.persPeer || this.persPeer.destroyed) return;
+  /** @internal */ public nsRegisterDisc(s: NSState, cfg: NSConfig, discRetry?: number) { _nsRegisterDisc(this, s, cfg, discRetry); }
 
-    const rid = cfg.makeRouterID(level);
-    this.log(`[${cfg.label}] Connecting to level ${level} router (attempt ${attempt + 1}/${this.MAX_JOIN_ATTEMPTS}): ${rid}`, 'info');
+  /** @internal */ public nsStartMonitor(s: NSState, cfg: NSConfig) { _nsStartMonitor(this, s, cfg); }
 
-    if (s.routerConn) { s.routerConn.close(); s.routerConn = null; }
-    if (s.joinTimeout) { clearTimeout(s.joinTimeout); s.joinTimeout = null; }
+  /** @internal */ public nsClearMonitor(s: NSState) { _nsClearMonitor(this, s); }
 
-    s.joinStatus = 'joining';
-    s.joinAttempt = attempt + 1;
-    this.nsEmit(s);
+  /** @internal */ public nsProbeLevel1(s: NSState, cfg: NSConfig) { _nsProbeLevel1(this, s, cfg); }
 
-    s.routerConn = this.persPeer.connect(rid, { reliable: true });
-    let connected = false;
-    let settled = false; // prevent double-fire from timeout + error
+  /** @internal */ public nsBroadcastMigration(s: NSState, level: number) { _nsBroadcastMigration(this, s, level); }
 
-    // Timeout: if connection hangs (NAT blocks WebRTC), treat as error
-    s.joinTimeout = setTimeout(() => {
-      if (settled || connected) return;
-      settled = true;
-      this.log(`[${cfg.label}] Join timeout at level ${level} (attempt ${attempt + 1}) — connection hung`, 'err');
-      try { s.routerConn?.close(); } catch {}
-      s.routerConn = null;
-      if (attempt + 1 < this.MAX_JOIN_ATTEMPTS) {
-        setTimeout(() => this.nsTryJoin(s, cfg, level, attempt + 1), 1500);
-      } else {
-        this.nsTryPeerSlot(s, cfg, level);
-      }
-    }, 8000);
+  /** @internal */ public nsMigrate(s: NSState, cfg: NSConfig, targetLevel: number) { _nsMigrate(this, s, cfg, targetLevel); }
 
-    s.routerConn.on('open', () => {
-      connected = true;
-      settled = true;
-      if (s.joinTimeout) { clearTimeout(s.joinTimeout); s.joinTimeout = null; }
-      s.joinStatus = null;
-      s.joinAttempt = 0;
-      s.isRouter = false;
-      s.level = level;
-      const discID = cfg.makeDiscID(this.discoveryUUID);
-      s.routerConn?.send({
-        type: 'checkin',
-        discoveryID: discID,
-        friendlyname: this.friendlyName,
-        publicKey: this.publicKeyStr,
-      });
-      this.log(`[${cfg.label}] Checked in to level ${level} router`, 'ok');
-      this.nsRegisterDisc(s, cfg);
-      if (level > 1) {
-        this.nsStartMonitor(s, cfg);
-      }
-      this.nsEmit(s);
-    });
+  /** @internal */ public nsFailover(s: NSState, cfg: NSConfig) { _nsFailover(this, s, cfg); }
 
-    s.routerConn.on('data', (d: any) => {
-      if (d.type === 'registry') this.nsMergeRegistry(s, cfg, d.peers);
-      if (d.type === 'ping') s.routerConn?.send({ type: 'pong' });
-      if (d.type === 'migrate') {
-        this.log(`[${cfg.label}] Router signaling migration to level ${d.level}`, 'info');
-        this.nsMigrate(s, cfg, d.level);
-      }
-    });
-
-    s.routerConn.on('close', () => {
-      if (!connected) return;
-      this.log(`[${cfg.label}] Router disconnected — failing over`, 'err');
-      s.routerConn = null;
-      this.nsClearMonitor(s);
-      this.nsFailover(s, cfg);
-    });
-
-    s.routerConn.on('error', (err: any) => {
-      if (settled) return;
-      settled = true;
-      if (s.joinTimeout) { clearTimeout(s.joinTimeout); s.joinTimeout = null; }
-      this.log(`[${cfg.label}] Join error at level ${level}: ${err.type}`, 'err');
-      s.routerConn = null;
-      if (attempt + 1 < this.MAX_JOIN_ATTEMPTS) {
-        setTimeout(() => this.nsTryJoin(s, cfg, level, attempt + 1), 1500);
-      } else {
-        // Try peer slot before escalating
-        this.nsTryPeerSlot(s, cfg, level);
-      }
-    });
-  }
-
-  private nsHandleRouterConn(s: NSState, cfg: NSConfig, conn: DataConnection) {
-    conn.on('data', (d: any) => {
-      if (d.type === 'checkin') {
-        const uuid = extractDiscUUID(d.discoveryID);
-
-        // Dedup: remove stale entry for same device (same public key)
-        if (d.publicKey) {
-          const staleKey = Object.keys(s.registry).find(did =>
-            did !== d.discoveryID && !!s.registry[did].publicKey && s.registry[did].publicKey === d.publicKey
-          );
-          if (staleKey) {
-            this.log(`[${cfg.label}] Replaced stale disc entry: …${staleKey.slice(-8)} → …${d.discoveryID.slice(-8)}`, 'info');
-            delete s.registry[staleKey];
-          }
-        }
-
-        // Match existing contact by public key first, then by discoveryUUID
-        const knownPID = Object.keys(this.contacts).find((pid) => {
-          const c = this.contacts[pid];
-          if (d.publicKey && c.publicKey && c.publicKey === d.publicKey) return true;
-          return c.discoveryUUID === uuid;
-        });
-
-        if (knownPID) {
-          this.contacts[knownPID].onNetwork = true;
-          this.contacts[knownPID].networkDiscID = d.discoveryID;
-        }
-
-        s.registry[d.discoveryID] = {
-          discoveryID: d.discoveryID,
-          friendlyName: d.friendlyname,
-          lastSeen: Date.now(),
-          conn,
-          knownPID: knownPID || null,
-          publicKey: d.publicKey || undefined,
-        };
-        this.log(`[${cfg.label}] Peer checked in at L${s.level}: ${d.discoveryID}`, 'ok');
-        this.nsBroadcast(s, cfg);
-        this.nsEmit(s);
-      }
-      if (d.type === 'pong') {
-        const key = Object.keys(s.registry).find((k) => s.registry[k].conn === conn);
-        if (key) s.registry[key].lastSeen = Date.now();
-      }
-    });
-    conn.on('close', () => {
-      const key = Object.keys(s.registry).find((k) => s.registry[k].conn === conn);
-      if (key) {
-        delete s.registry[key];
-        this.nsBroadcast(s, cfg);
-        this.nsEmit(s);
-      }
-    });
-  }
-
-  private nsBroadcast(s: NSState, _cfg: NSConfig) {
-    const peers = Object.keys(s.registry).map((did) => ({
-      discoveryID: did,
-      friendlyname: s.registry[did].friendlyName,
-      publicKey: s.registry[did].publicKey,
-    }));
-    Object.values(s.registry).forEach((r) => {
-      if (r.conn && !r.isMe) {
-        try {
-          r.conn.send({ type: 'registry', peers });
-        } catch {}
-      }
-    });
-  }
-
-  private nsMergeRegistry(s: NSState, cfg: NSConfig, peers: any[]) {
-    this.log(`[${cfg.label}] Registry update: ${peers.length} peers`, 'info');
-    const myDiscID = cfg.makeDiscID(this.discoveryUUID);
-
-    const newRegistry: Record<string, PeerInfo> = {};
-    const myEntry = Object.values(s.registry).find(r => r.isMe);
-    if (myEntry) newRegistry[myEntry.discoveryID] = myEntry;
-
-    // Reset all contacts onNetwork before rebuild — only for public NS
-    if (s === this.publicNS) {
-      Object.keys(this.contacts).forEach((pid) => {
-        this.contacts[pid].onNetwork = false;
-        this.contacts[pid].networkDiscID = null;
-      });
-    }
-
-    peers.forEach((p) => {
-      if (p.discoveryID === myDiscID) return;
-
-      const uuid = extractDiscUUID(p.discoveryID);
-
-      // Dedup: if we already have an entry for this same public key, remove older one
-      if (p.publicKey) {
-        const staleKey = Object.keys(newRegistry).find(did =>
-          did !== p.discoveryID && !newRegistry[did].isMe && !!newRegistry[did].publicKey && newRegistry[did].publicKey === p.publicKey
-        );
-        if (staleKey) delete newRegistry[staleKey];
-      }
-
-      // Match by publicKey OR discoveryUUID
-      const knownPID = Object.keys(this.contacts).find((pid) => {
-        const c = this.contacts[pid];
-        if (p.publicKey && c.publicKey && c.publicKey === p.publicKey) return true;
-        return c.discoveryUUID === uuid;
-      });
-
-      if (knownPID) {
-        this.contacts[knownPID].onNetwork = true;
-        this.contacts[knownPID].networkDiscID = p.discoveryID;
-        // Store public key if we receive it for the first time
-        if (p.publicKey && !this.contacts[knownPID].publicKey) {
-          this.contacts[knownPID].publicKey = p.publicKey;
-          saveContacts(this.contacts);
-        }
-      }
-
-      newRegistry[p.discoveryID] = {
-        discoveryID: p.discoveryID,
-        friendlyName: p.friendlyname,
-        lastSeen: Date.now(),
-        knownPID: knownPID || null,
-        publicKey: p.publicKey || undefined,
-      };
-    });
-
-    s.registry = newRegistry;
-    this.nsEmit(s);
-    // Check rendezvous registry for target contact
-    if (s === this.rvzState) this.rvzCheckRegistry(s);
-  }
-
-  private nsStartPingTimer(s: NSState, cfg: NSConfig) {
-    if (s.pingTimer) clearInterval(s.pingTimer);
-    s.pingTimer = setInterval(() => {
-      const now = Date.now();
-      Object.keys(s.registry).forEach((did) => {
-        const r = s.registry[did];
-        if (r.isMe) return;
-        if (r.conn) {
-          try { r.conn.send({ type: 'ping' }); } catch {}
-        }
-        if (now - r.lastSeen > TTL + 10000) {
-          this.log(`[${cfg.label}] Peer timed out: ${did}`, 'err');
-          delete s.registry[did];
-          this.nsBroadcast(s, cfg);
-          this.nsEmit(s);
-        }
-      });
-    }, PING_IV);
-  }
-
-  private nsRegisterDisc(s: NSState, cfg: NSConfig) {
-    const discID = cfg.makeDiscID(this.discoveryUUID);
-
-    // Reuse existing discPeer if still alive
-    if (s.discPeer && !s.discPeer.destroyed) {
-      if (!s.registry[discID]) {
-        s.registry[discID] = {
-          discoveryID: discID,
-          friendlyName: this.friendlyName,
-          lastSeen: Date.now(),
-          isMe: true,
-          publicKey: this.publicKeyStr || undefined,
-        };
-      }
-      if (s.isRouter) this.nsBroadcast(s, cfg);
-      this.nsEmit(s);
-      return;
-    }
-
-    // Destroy old discPeer before creating new
-    if (s.discPeer) { s.discPeer.destroy(); s.discPeer = null; }
-
-    s.discPeer = new Peer(discID);
-    s.discPeer.on('open', (id) => {
-      this.log(`[${cfg.label}] Discovery ID: ${id}`, 'ok');
-      s.registry[id] = {
-        discoveryID: id,
-        friendlyName: this.friendlyName,
-        lastSeen: Date.now(),
-        isMe: true,
-        publicKey: this.publicKeyStr || undefined,
-      };
-
-      if (s.isRouter) {
-        this.nsBroadcast(s, cfg);
-      }
-      this.nsEmit(s);
-    });
-
-    s.discPeer.on('connection', (conn) => {
-      conn.on('data', (d) => this.handleDiscData(d, conn));
-    });
-
-    s.discPeer.on('error', (e: any) => {
-      this.log(`[${cfg.label}] Discovery error: ${e.type}`, 'err');
-      if (e.type === 'unavailable-id') {
-        // UUID collision — regenerate
-        this.discoveryUUID = crypto.randomUUID().replace(/-/g, '');
-        localStorage.setItem(`${APP_PREFIX}-disc-uuid`, this.discoveryUUID);
-        if (s === this.publicNS) {
-          this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
-        }
-        this.nsRegisterDisc(s, cfg);
-      }
-    });
-  }
-
-  private nsStartMonitor(s: NSState, cfg: NSConfig) {
-    this.nsClearMonitor(s);
-    s.monitorTimer = setInterval(() => this.nsProbeLevel1(s, cfg), 30000);
-  }
-
-  private nsClearMonitor(s: NSState) {
-    if (s.monitorTimer) {
-      clearInterval(s.monitorTimer);
-      s.monitorTimer = null;
-    }
-  }
-
-  private nsProbeLevel1(s: NSState, cfg: NSConfig) {
-    if (s.level <= 1) return;
-    if (s !== this.publicNS) {
-      const cs = s as CNSState;
-      if (cs.offline) return;
-    } else {
-      if (!this.publicIP) return;
-    }
-
-    const rid = cfg.makeRouterID(1);
-    const peer = s.discPeer || this.persPeer;
-    if (!peer) return;
-
-    this.log(`[${cfg.label}] Probing level 1 namespace availability...`, 'info');
-
-    const testConn = peer.connect(rid, { reliable: true });
-    let settled = false;
-
-    const resolve = (routerFound: boolean) => {
-      if (settled) return;
-      settled = true;
-      try { testConn.close(); } catch {}
-
-      if (routerFound) {
-        this.log(`[${cfg.label}] Level 1 router live — migrating from level ${s.level}`, 'info');
-        if (s.isRouter) {
-          this.nsBroadcastMigration(s, 1);
-          setTimeout(() => this.nsMigrate(s, cfg, 1), 600);
-        } else {
-          this.nsMigrate(s, cfg, 1);
-        }
-      } else {
-        // Level 1 is unclaimed
-        if (s.isRouter) {
-          this.log(`[${cfg.label}] Level 1 unclaimed — reclaiming from level ${s.level}`, 'info');
-          this.nsBroadcastMigration(s, 1);
-          setTimeout(() => {
-            this.nsClearMonitor(s);
-            if (s.routerPeer) { s.routerPeer.destroy(); s.routerPeer = null; }
-            if (s.discPeer) { s.discPeer.destroy(); s.discPeer = null; }
-            if (s.routerConn) { s.routerConn.close(); s.routerConn = null; }
-            // Clear peer slot state
-            if (s.peerSlotProbeTimer) { clearInterval(s.peerSlotProbeTimer); s.peerSlotProbeTimer = null; }
-            if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) { try { s.peerSlotPeer.destroy(); } catch {} s.peerSlotPeer = null; }
-            if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-            s.isRouter = false;
-            s.level = 0;
-            const myEntry = Object.values(s.registry).find(r => r.isMe);
-            s.registry = myEntry ? { [myEntry.discoveryID]: myEntry } : {};
-            this.nsEmit(s);
-            this.nsAttempt(s, cfg, 1);
-          }, 600);
-        }
-      }
-    };
-
-    testConn.on('open', () => resolve(true));
-    testConn.on('error', () => resolve(false));
-    setTimeout(() => resolve(false), 4000);
-  }
-
-  private nsBroadcastMigration(s: NSState, level: number) {
-    Object.values(s.registry).forEach((r) => {
-      if (r.conn && !r.isMe) {
-        try { r.conn.send({ type: 'migrate', level }); } catch {}
-      }
-    });
-  }
-
-  private nsMigrate(s: NSState, cfg: NSConfig, targetLevel: number) {
-    this.log(`[${cfg.label}] Migrating to level ${targetLevel}`, 'info');
-    this.nsClearMonitor(s);
-    if (s.routerConn) { s.routerConn.close(); s.routerConn = null; }
-    if (s.routerPeer) { s.routerPeer.destroy(); s.routerPeer = null; }
-    if (s.discPeer) { s.discPeer.destroy(); s.discPeer = null; }
-    // Clear peer slot state
-    if (s.peerSlotProbeTimer) { clearInterval(s.peerSlotProbeTimer); s.peerSlotProbeTimer = null; }
-    if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) { try { s.peerSlotPeer.destroy(); } catch {} s.peerSlotPeer = null; }
-    if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-    s.isRouter = false;
-    s.level = 0;
-    const myEntry = Object.values(s.registry).find(r => r.isMe);
-    s.registry = myEntry ? { [myEntry.discoveryID]: myEntry } : {};
-    this.nsEmit(s);
-    setTimeout(() => this.nsAttempt(s, cfg, targetLevel), Math.random() * 2000);
-  }
-
-  private nsFailover(s: NSState, cfg: NSConfig) {
-    if (s === this.publicNS && this.namespaceOffline) return;
-    if (s !== this.publicNS) {
-      const cs = s as CNSState;
-      if (cs.offline) return;
-    }
-
-    const jitter = Math.random() * 3000;
-    this.log(`[${cfg.label}] Failover in ${(jitter / 1000).toFixed(1)}s — restarting from L1`, 'info');
-    this.nsClearMonitor(s);
-    setTimeout(() => {
-      if (s.routerPeer) { s.routerPeer.destroy(); s.routerPeer = null; }
-      if (s.discPeer) { s.discPeer.destroy(); s.discPeer = null; }
-      if (s.routerConn) { s.routerConn.close(); s.routerConn = null; }
-      // Clear peer slot state
-      if (s.peerSlotProbeTimer) { clearInterval(s.peerSlotProbeTimer); s.peerSlotProbeTimer = null; }
-      if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) { try { s.peerSlotPeer.destroy(); } catch {} s.peerSlotPeer = null; }
-      if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-      s.isRouter = false;
-      s.level = 0;
-
-      const myEntry = Object.values(s.registry).find(r => r.isMe);
-      s.registry = myEntry ? { [myEntry.discoveryID]: myEntry } : {};
-      this.nsEmit(s);
-
-      if (s === this.publicNS) {
-        this.discoveryID = makeDiscID(this.publicIP, this.discoveryUUID);
-      }
-      this.nsAttempt(s, cfg, 1);
-    }, jitter);
-  }
-
-  private nsTeardown(s: NSState, keepDisc = false) {
-    if (s.pingTimer) { clearInterval(s.pingTimer); s.pingTimer = null; }
-    if (s.monitorTimer) { clearInterval(s.monitorTimer); s.monitorTimer = null; }
-    if (s.peerSlotProbeTimer) { clearInterval(s.peerSlotProbeTimer); s.peerSlotProbeTimer = null; }
-    if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) { try { s.peerSlotPeer.destroy(); } catch {} s.peerSlotPeer = null; }
-    if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-    if (s.joinTimeout) { clearTimeout(s.joinTimeout); s.joinTimeout = null; }
-    s.joinStatus = null;
-    s.joinAttempt = 0;
-    if (s.routerPeer && !s.routerPeer.destroyed) { try { s.routerPeer.destroy(); } catch {} s.routerPeer = null; }
-    if (s.routerConn) { try { s.routerConn.close(); } catch {} s.routerConn = null; }
-    if (!keepDisc && s.discPeer && !s.discPeer.destroyed) { try { s.discPeer.destroy(); } catch {} s.discPeer = null; }
-  }
+  /** @internal */ public nsTeardown(s: NSState, keepDisc = false) { _nsTeardown(this, s, keepDisc); }
 
   // ─── EDM NAT Reverse-Connect (-p1 peer slot) ──────────────────────────────
 
   /** Peer side: claim the -p1 slot and wait for router to connect */
-  private nsTryPeerSlot(s: NSState, cfg: NSConfig, level: number) {
-    const slotID = cfg.makePeerSlotID();
-    this.log(`[${cfg.label}] Trying peer slot (-p1 reverse connect): ${slotID}`, 'info');
-
-    // Clean up any previous peer slot attempt
-    if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) { try { s.peerSlotPeer.destroy(); } catch {} }
-    if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-
-    s.joinStatus = 'peer-slot';
-    s.joinAttempt = 0;
-    this.nsEmit(s);
-
-    s.peerSlotPeer = new Peer(slotID);
-
-    s.peerSlotPeer.on('open', () => {
-      this.log(`[${cfg.label}] Peer slot claimed — waiting for router probe`, 'info');
-
-      // Listen for incoming connection from router
-      s.peerSlotPeer?.on('connection', (conn: DataConnection) => {
-        conn.on('data', (d: any) => {
-          if (d.type === 'reverse-welcome') {
-            this.log(`[${cfg.label}] Router probed our peer slot — checking in via reverse connect`, 'ok');
-            const discID = cfg.makeDiscID(this.discoveryUUID);
-            conn.send({
-              type: 'checkin',
-              discoveryID: discID,
-              friendlyname: this.friendlyName,
-              publicKey: this.publicKeyStr,
-            });
-
-            // Use this connection as our router connection
-            s.routerConn = conn;
-            s.isRouter = false;
-            s.level = level;
-            s.joinStatus = null;
-            s.joinAttempt = 0;
-            this.nsRegisterDisc(s, cfg);
-
-            conn.on('data', (d2: any) => {
-              if (d2.type === 'registry') this.nsMergeRegistry(s, cfg, d2.peers);
-              if (d2.type === 'ping') conn.send({ type: 'pong' });
-              if (d2.type === 'migrate') {
-                this.log(`[${cfg.label}] Router signaling migration to level ${d2.level}`, 'info');
-                this.nsMigrate(s, cfg, d2.level);
-              }
-            });
-
-            conn.on('close', () => {
-              this.log(`[${cfg.label}] Reverse-connect router dropped — failing over`, 'err');
-              s.routerConn = null;
-              this.nsClearMonitor(s);
-              this.nsFailover(s, cfg);
-            });
-
-            // Destroy the peer slot peer to free the -p1 slot for next peer
-            if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) {
-              try { s.peerSlotPeer.destroy(); } catch {}
-            }
-            s.peerSlotPeer = null;
-            if (s.peerSlotTimer) { clearTimeout(s.peerSlotTimer); s.peerSlotTimer = null; }
-
-            this.nsEmit(s);
-          }
-        });
-      });
-
-      // 30s timeout: give up and escalate
-      s.peerSlotTimer = setTimeout(() => {
-        this.log(`[${cfg.label}] Peer slot timeout — escalating to level ${level + 1}`, 'info');
-        if (s.peerSlotPeer && !s.peerSlotPeer.destroyed) {
-          try { s.peerSlotPeer.destroy(); } catch {}
-        }
-        s.peerSlotPeer = null;
-        s.peerSlotTimer = null;
-        s.joinStatus = null;
-        s.joinAttempt = 0;
-        this.nsAttempt(s, cfg, level + 1);
-      }, 30000);
-    });
-
-    s.peerSlotPeer.on('error', (e: any) => {
-      if (e.type === 'unavailable-id') {
-        // Slot occupied by another peer — retry in 3-5s
-        this.log(`[${cfg.label}] Peer slot occupied — retrying`, 'info');
-        s.peerSlotPeer = null;
-        s.peerSlotTimer = setTimeout(() => {
-          s.peerSlotTimer = null;
-          this.nsTryPeerSlot(s, cfg, level);
-        }, 3000 + Math.random() * 2000);
-      } else {
-        // Other error — escalate
-        this.log(`[${cfg.label}] Peer slot error: ${e.type} — escalating`, 'err');
-        s.peerSlotPeer = null;
-        this.nsAttempt(s, cfg, level + 1);
-      }
-    });
-  }
+  /** @internal */ public nsTryPeerSlot(s: NSState, cfg: NSConfig, level: number, peerSlotAttempt?: number) { _nsTryPeerSlot(this, s, cfg, level, peerSlotAttempt); }
 
   /** Router side: start continuously probing the -p1 slot */
-  private nsStartPeerSlotProbe(s: NSState, cfg: NSConfig) {
-    if (s.peerSlotProbeTimer) { clearInterval(s.peerSlotProbeTimer); }
-    s.peerSlotProbeTimer = setInterval(() => this.nsProbePeerSlot(s, cfg), 5000);
-  }
+  /** @internal */ public nsStartPeerSlotProbe(s: NSState, cfg: NSConfig) { _nsStartPeerSlotProbe(this, s, cfg); }
 
   /** Router side: single probe of the -p1 slot */
-  private nsProbePeerSlot(s: NSState, cfg: NSConfig) {
-    if (!this.persPeer || this.persPeer.destroyed || this.persPeer.disconnected) return;
-    if (!s.isRouter) return;
-
-    const slotID = cfg.makePeerSlotID();
-    const conn = this.persPeer.connect(slotID, { reliable: true });
-
-    const timeout = setTimeout(() => {
-      try { conn.close(); } catch {}
-    }, 5000);
-
-    conn.on('open', () => {
-      conn.send({ type: 'reverse-welcome' });
-
-      conn.on('data', (d: any) => {
-        clearTimeout(timeout);
-        if (d.type === 'checkin') {
-          this.log(`[${cfg.label}] Reverse-connect peer checked in: ${d.discoveryID}`, 'ok');
-
-          const uuid = extractDiscUUID(d.discoveryID);
-
-          // Dedup by public key
-          if (d.publicKey) {
-            const staleKey = Object.keys(s.registry).find(did =>
-              did !== d.discoveryID && !!s.registry[did].publicKey && s.registry[did].publicKey === d.publicKey
-            );
-            if (staleKey) {
-              delete s.registry[staleKey];
-            }
-          }
-
-          const knownPID = Object.keys(this.contacts).find((pid) => {
-            const c = this.contacts[pid];
-            if (d.publicKey && c.publicKey && c.publicKey === d.publicKey) return true;
-            return c.discoveryUUID === uuid;
-          });
-
-          if (knownPID) {
-            this.contacts[knownPID].onNetwork = true;
-            this.contacts[knownPID].networkDiscID = d.discoveryID;
-          }
-
-          s.registry[d.discoveryID] = {
-            discoveryID: d.discoveryID,
-            friendlyName: d.friendlyname,
-            lastSeen: Date.now(),
-            conn,
-            knownPID: knownPID || null,
-            publicKey: d.publicKey || undefined,
-          };
-          this.nsBroadcast(s, cfg);
-          this.nsEmit(s);
-
-          // Monitor this connection
-          conn.on('close', () => {
-            if (s.registry[d.discoveryID]?.conn === conn) {
-              delete s.registry[d.discoveryID];
-              this.nsBroadcast(s, cfg);
-              this.nsEmit(s);
-            }
-          });
-        }
-      });
-    });
-
-    conn.on('error', () => {
-      clearTimeout(timeout);
-      // No peer waiting — silently ignore
-    });
-  }
+  /** @internal */ public nsProbePeerSlot(s: NSState, cfg: NSConfig) { _nsProbePeerSlot(this, s, cfg); }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ═══ Public IP Routing (thin wrappers over ns* core) ══════════════════════
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private attemptNamespace(level: number) {
+  /** @internal */ public attemptNamespace(level: number) {
     this.nsAttempt(this.publicNS, this.publicNSConfig, level);
   }
 
-  private tryJoinNamespace(level: number, attempt: number = 0) {
+  /** @internal */ public tryJoinNamespace(level: number, attempt: number = 0) {
     this.nsTryJoin(this.publicNS, this.publicNSConfig, level, attempt);
   }
 
@@ -1533,7 +831,7 @@ export class P2PManager extends EventTarget {
     this.nsProbeLevel1(this.publicNS, this.publicNSConfig);
   }
 
-  private failover() {
+  /** @internal */ public failover() {
     this.nsFailover(this.publicNS, this.publicNSConfig);
   }
 
@@ -1543,523 +841,37 @@ export class P2PManager extends EventTarget {
 
   // ─── Manual connect / handshake ───────────────────────────────────────────
 
-  public requestConnect(targetID: string, fname: string) {
-    if (targetID === this.discoveryID || targetID === this.persistentID) return;
-    this.log(`Requesting connection to: ${targetID}`, 'info');
+  /** @internal */ public requestConnect(targetID: string, fname: string) { _requestConnect(this, targetID, fname); }
 
-    const isPersistent = targetID.split('-').length === 2;
-    const peer = isPersistent ? this.persPeer : (this.publicNS.discPeer || this.persPeer);
+  /** @internal */ public handleDiscData(d: any, conn: DataConnection) { _handleDiscData(this, d, conn); }
 
-    if (!peer) {
-      this.log('No active peer instance to connect', 'err');
-      return;
-    }
+  /** @internal */ public async handleHandshakeData(d: any, conn: DataConnection) { _handleHandshakeData(this, d, conn); }
 
-    if (!this.contacts[targetID]) {
-      this.contacts[targetID] = { friendlyName: fname, discoveryID: isPersistent ? null : targetID, discoveryUUID: '', pending: 'outgoing' };
-      if (!this.chats[targetID]) this.chats[targetID] = [];
-      saveContacts(this.contacts);
-      saveChats(this.chats);
-      this.emitPeerListUpdate();
-    }
+  /** @internal */ public connectPersistent(pid: string, fname: string) { _connectPersistent(this, pid, fname); }
 
-    const conn = peer.connect(targetID, { reliable: true });
-    conn.on('open', async () => {
-      this.log(`Handshake channel open with ${targetID}`, 'info');
-      const ts = String(Date.now());
-      const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
-      conn.send({ type: 'request', friendlyname: this.friendlyName, publicKey: this.publicKeyStr, persistentID: this.persistentID, ts, signature });
-    });
+  /** @internal */ public markWaitingMessagesFailed(contactKey: string) { _markWaitingMessagesFailed(this, contactKey); }
 
-    conn.on('data', (d: any) => {
-      if (d.type === 'accepted') {
-        this.log(`Request accepted by ${fname}`, 'ok');
-        conn.send({
-          type: 'confirm',
-          persistentID: this.persistentID,
-          friendlyname: this.friendlyName,
-          discoveryUUID: this.discoveryUUID,
-          publicKey: this.publicKeyStr,
-        });
+  /** @internal */ public resetUnackedMessages() { _resetUnackedMessages(this); }
+  /** @internal */ public resetContactMessages(contactKey: string) { _resetContactMessages(this, contactKey); }
 
-        const dupPID = d.publicKey ? this.findContactByPublicKey(d.publicKey, d.persistentID) : null;
-        if (dupPID) this.migrateContact(dupPID, d.persistentID);
+  /** @internal */ public async handlePersistentData(d: any, conn: DataConnection) { _handlePersistentData(this, d, conn); }
 
-        if (isPersistent && this.contacts[targetID]?.pending) {
-          delete this.contacts[targetID];
-        }
-
-        this.contacts[d.persistentID] = {
-          ...(this.contacts[d.persistentID] || {}),
-          friendlyName: fname,
-          discoveryID: isPersistent ? null : targetID,
-          discoveryUUID: d.discoveryUUID,
-          conn: null,
-        };
-
-        if (!this.chats[d.persistentID]) this.chats[d.persistentID] = [];
-        saveContacts(this.contacts);
-        saveChats(this.chats);
-
-        setTimeout(() => conn.close(), 1000);
-        this.connectPersistent(d.persistentID, fname);
-        this.emitPeerListUpdate();
-      }
-      if (d.type === 'rejected') {
-        this.log(`${fname} rejected the connection`, 'err');
-        if (this.contacts[targetID]?.pending) {
-          delete this.contacts[targetID];
-          saveContacts(this.contacts);
-          this.emitPeerListUpdate();
-        }
-        conn.close();
-      }
-    });
-
-    conn.on('error', (err) => {
-      this.log(`Connection request failed: ${err.type}`, 'err');
-    });
-  }
-
-  private handleDiscData(d: any, conn: DataConnection) {
-    if (d.type === 'rvz-exchange') {
-      this.rvzHandleExchange(d, conn);
-      return;
-    }
-    this.handleHandshakeData(d, conn);
-  }
-
-  private async handleHandshakeData(d: any, conn: DataConnection) {
-    if (d.type === 'request') {
-      const fname = d.friendlyname;
-      let verified = false;
-      let fingerprint = '';
-      if (d.publicKey && d.ts && d.signature && window.crypto?.subtle) {
-        try {
-          const key = await importPublicKey(d.publicKey);
-          verified = await verifySignature(key, d.signature, d.ts);
-          const bytes = new TextEncoder().encode(d.publicKey);
-          const hash = await crypto.subtle.digest('SHA-256', bytes);
-          fingerprint = Array.from(new Uint8Array(hash)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
-        } catch {}
-      }
-      const requesterPID = d.persistentID as string | undefined;
-      this.log(`Incoming connection request from ${fname}${verified ? ' (verified)' : ''}`, 'info');
-      this.notify('Connection Request', `${fname} wants to connect`, 'conn-request');
-      const event = new CustomEvent('connection-request', {
-        detail: {
-          fname,
-          publicKey: d.publicKey || null,
-          fingerprint,
-          verified,
-          accept: () => {
-            conn.send({ type: 'accepted', persistentID: this.persistentID, discoveryUUID: this.discoveryUUID });
-            this.log(`Accepted request from ${fname}`, 'ok');
-          },
-          reject: () => {
-            conn.send({ type: 'rejected' });
-            setTimeout(() => conn.close(), 500);
-          },
-          saveForLater: () => {
-            if (!requesterPID) return;
-            this.contacts[requesterPID] = {
-              friendlyName: fname,
-              discoveryID: null,
-              discoveryUUID: '',
-              pending: 'incoming',
-              publicKey: d.publicKey || undefined,
-              pendingFingerprint: fingerprint || undefined,
-              pendingVerified: verified,
-            };
-            if (!this.chats[requesterPID]) this.chats[requesterPID] = [];
-            saveContacts(this.contacts);
-            saveChats(this.chats);
-            this.emitPeerListUpdate();
-            this.log(`Saved incoming request from ${fname} for later`, 'info');
-            conn.close();
-          },
-        }
-      });
-      this.dispatchEvent(event);
-    }
-    if (d.type === 'confirm') {
-      const pid = d.persistentID;
-      this.log(`Handshake confirmed by ${d.friendlyname} (${pid})`, 'ok');
-
-      const dupPID = d.publicKey ? this.findContactByPublicKey(d.publicKey, pid) : null;
-      if (dupPID) this.migrateContact(dupPID, pid);
-
-      this.contacts[pid] = {
-        ...(this.contacts[pid] || {}),
-        friendlyName: d.friendlyname,
-        discoveryID: null,
-        discoveryUUID: d.discoveryUUID,
-        conn: null
-      };
-      if (!this.chats[pid]) this.chats[pid] = [];
-      saveContacts(this.contacts);
-      saveChats(this.chats);
-      setTimeout(() => conn.close(), 500);
-      this.emitPeerListUpdate();
-    }
-  }
-
-  public connectPersistent(pid: string, fname: string) {
-    if (!this.persPeer || this.persPeer.destroyed) return;
-    if (this.persPeer.disconnected) {
-      this.log(`Signaling down — will reconnect to ${fname} when online`, 'info');
-      return;
-    }
-
-    if (this.contacts[pid]?.conn && !this.contacts[pid].conn.open) {
-      this.contacts[pid].conn = null;
-    }
-
-    if (this.contacts[pid]?.conn?.open) {
-      this.log(`Already connected to ${fname}`, 'info');
-      return;
-    }
-
-    this.log(`Opening persistent connection to ${fname} (${pid})...`, 'info');
-    this.connectingPIDs.add(pid);
-    const conn = this.persPeer.connect(pid, { reliable: true });
-
-    conn.on('open', async () => {
-      this.connectingPIDs.delete(pid);
-      if (!this.contacts[pid]) this.contacts[pid] = { friendlyName: fname, discoveryID: null, discoveryUUID: '' };
-      this.contacts[pid].conn = conn;
-
-      const ts = Date.now().toString();
-      let signature = '';
-      if (this.privateKey) {
-        signature = await signData(this.privateKey, ts);
-      }
-
-      conn.send({
-        type: 'hello',
-        friendlyname: this.friendlyName,
-        publicKey: this.publicKeyStr,
-        ts,
-        signature
-      });
-
-      this.flushMessageQueue(pid);
-      this.emitPeerListUpdate();
-      this.log(`Persistent channel open with ${fname}`, 'ok');
-    });
-
-    conn.on('data', (d) => this.handlePersistentData(d, conn));
-
-    conn.on('close', () => {
-      this.connectingPIDs.delete(pid);
-      this.log(`Persistent channel closed with ${fname}`, 'info');
-      if (this.contacts[pid]) {
-        this.contacts[pid].conn = null;
-        this.emitPeerListUpdate();
-      }
-    });
-
-    conn.on('error', (err) => {
-      this.connectingPIDs.delete(pid);
-      this.log(`Persistent connection error with ${fname}: ${err.type}`, 'err');
-      if (this.persPeer?.disconnected || this.offlineMode) return;
-      this.connectFailures[pid] = (this.connectFailures[pid] || 0) + 1;
-      if (this.connectFailures[pid] < this.MAX_CONNECT_RETRIES) {
-        const delay = 5000 * this.connectFailures[pid];
-        this.log(`Retry ${this.connectFailures[pid]}/${this.MAX_CONNECT_RETRIES} for ${fname} in ${delay / 1000}s`, 'info');
-        setTimeout(() => {
-          if (!this.contacts[pid]?.conn?.open && !this.connectingPIDs.has(pid)) {
-            this.connectPersistent(pid, fname);
-          }
-        }, delay);
-      } else {
-        this.log(`${fname} unreachable after ${this.MAX_CONNECT_RETRIES} attempts — marking messages failed`, 'err');
-        this.markWaitingMessagesFailed(pid);
-        this.rvzEnqueue(pid);
-      }
-    });
-  }
-
-  private markWaitingMessagesFailed(pid: string) {
-    const msgs = this.chats[pid];
-    if (!msgs) return;
-    let changed = false;
-    msgs.forEach(m => {
-      if (m.dir === 'sent' && m.status === 'waiting') {
-        m.status = 'failed';
-        changed = true;
-      }
-    });
-    if (changed) {
-      saveChats(this.chats);
-      this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-    }
-  }
-
-  private resetUnackedMessages() {
-    let changed = false;
-    Object.keys(this.chats).forEach(pid => {
-      this.chats[pid]?.forEach(m => {
-        if (m.dir === 'sent' && m.status === 'sent') {
-          m.status = 'waiting';
-          changed = true;
-        }
-      });
-    });
-    if (changed) saveChats(this.chats);
-  }
-
-  private async handlePersistentData(d: any, conn: DataConnection) {
-    const pid = conn.peer;
-
-    if (['request', 'confirm'].includes(d.type)) {
-      return this.handleHandshakeData(d, conn);
-    }
-
-    if (d.type === 'hello') {
-      if (d.publicKey) {
-        const dupPID = this.findContactByPublicKey(d.publicKey, pid);
-        if (dupPID) this.migrateContact(dupPID, pid);
-      }
-
-      const isNew = !this.contacts[pid] || !this.contacts[pid].conn;
-
-      if (d.publicKey && d.signature && d.ts) {
-        if (window.crypto?.subtle) {
-          try {
-            const key = await importPublicKey(d.publicKey);
-            const valid = await verifySignature(key, d.signature, d.ts);
-            if (!valid) {
-              this.log(`Invalid signature from ${d.friendlyname}`, 'err');
-              conn.close();
-              return;
-            }
-            if (!this.contacts[pid]) this.contacts[pid] = { friendlyName: d.friendlyname, discoveryID: null, discoveryUUID: '', conn, publicKey: d.publicKey };
-            this.contacts[pid].publicKey = d.publicKey;
-            this.log(`Verified identity for ${d.friendlyname}`, 'ok');
-            // Derive ECDH shared key now that we have their verified public key
-            this.getOrDeriveSharedKey(pid);
-          } catch {
-            this.log(`Identity verification failed for ${d.friendlyname}`, 'err');
-          }
-        } else {
-          this.log(`No secure context — skipping identity check for ${d.friendlyname}`, 'info');
-        }
-      }
-
-      if (!this.contacts[pid]) this.contacts[pid] = { friendlyName: d.friendlyname, discoveryID: null, discoveryUUID: '', conn };
-      this.contacts[pid].conn = conn;
-      this.contacts[pid].friendlyName = d.friendlyname;
-      this.contacts[pid].lastSeen = Date.now();
-      delete this.contacts[pid].pending;
-      if (!this.chats[pid]) this.chats[pid] = [];
-
-      if (isNew) {
-        const ts = Date.now().toString();
-        let signature = '';
-        if (this.privateKey) {
-          signature = await signData(this.privateKey, ts);
-        }
-        conn.send({
-          type: 'hello',
-          friendlyname: this.friendlyName,
-          publicKey: this.publicKeyStr,
-          ts,
-          signature
-        });
-      }
-      delete this.connectFailures[pid];
-      saveContacts(this.contacts);
-      this.emitPeerListUpdate();
-      this.log(`Hello from ${d.friendlyname}`, 'ok');
-    }
-
-    if (d.type === 'message') {
-      if (!this.chats[pid]) this.chats[pid] = [];
-      let content = d.content || '';
-      // E2E encrypted message: decrypt and verify signature
-      if (d.e2e && d.ct && d.iv) {
-        try {
-          const sk = await this.getOrDeriveSharedKey(pid);
-          const contact = this.contacts[pid];
-          if (sk && contact?.publicKey) {
-            const pubKey = await importPublicKey(contact.publicKey);
-            const sigValid = await verifySignature(pubKey, d.sig, d.ct);
-            if (sigValid) {
-              content = await decryptMessage(sk.key, d.iv, d.ct);
-            } else {
-              this.log(`E2E signature mismatch from ${contact.friendlyName} — showing as unverified`, 'err');
-              content = '[unverified encrypted message]';
-            }
-          } else {
-            content = '[encrypted — no shared key]';
-          }
-        } catch (e) {
-          this.log(`E2E decrypt failed from ${pid}: ${e}`, 'err');
-          content = '[encrypted — decryption failed]';
-        }
-      }
-      // ALWAYS create the message and send ack — never silently drop
-      const msg: ChatMessage = { id: d.id || crypto.randomUUID(), dir: 'recv', content, ts: d.ts, type: 'text' };
-      this.chats[pid].push(msg);
-      saveChats(this.chats);
-      if (conn.open) conn.send({ type: 'message-ack', id: d.id });
-      const fname = this.contacts[pid]?.friendlyName || 'Someone';
-      this.notify(fname, content.slice(0, 100) || 'New message', `msg-${pid}`);
-      this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
-    }
-
-    if (d.type === 'message-ack') {
-      const msgs = this.chats[pid];
-      if (msgs) {
-        const msg = msgs.find(m => m.id === d.id && m.dir === 'sent');
-        if (msg) {
-          msg.status = 'delivered';
-          saveChats(this.chats);
-          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-        }
-      }
-    }
-
-    if (d.type === 'message-edit') {
-      const msgs = this.chats[pid];
-      if (msgs) {
-        const msg = msgs.find(m => m.id === d.id);
-        if (msg && !msg.deleted) {
-          let editContent = d.content || '';
-          if (d.e2e && d.ct && d.iv) {
-            try {
-              const sk = await this.getOrDeriveSharedKey(pid);
-              const contact = this.contacts[pid];
-              if (sk && contact?.publicKey) {
-                const pubKey = await importPublicKey(contact.publicKey);
-                const sigValid = await verifySignature(pubKey, d.sig, d.ct);
-                if (sigValid) {
-                  editContent = await decryptMessage(sk.key, d.iv, d.ct);
-                } else {
-                  editContent = '[unverified edit]';
-                }
-              } else {
-                editContent = '[encrypted edit — no shared key]';
-              }
-            } catch {
-              editContent = '[encrypted edit — decryption failed]';
-            }
-          }
-          msg.content = editContent;
-          msg.edited = true;
-          saveChats(this.chats);
-          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-        }
-      }
-    }
-
-    if (d.type === 'message-delete') {
-      const msgs = this.chats[pid];
-      if (msgs) {
-        const msg = msgs.find(m => m.id === d.id);
-        if (msg) {
-          msg.content = '';
-          msg.deleted = true;
-          saveChats(this.chats);
-          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-        }
-      }
-    }
-
-    if (d.type === 'file-start') {
-      this.incomingFiles[d.tid] = { tid: d.tid, name: d.name, size: d.size, total: d.total, chunks: [], received: 0 };
-      this.log(`Receiving: ${d.name}`, 'info');
-    }
-    if (d.type === 'file-chunk') {
-      const f = this.incomingFiles[d.tid];
-      if (f) {
-        f.chunks[d.index] = d.chunk;
-        f.received++;
-        this.dispatchEvent(new CustomEvent('file-progress', { detail: { tid: d.tid, progress: f.received / f.total, name: f.name } }));
-      }
-    }
-    if (d.type === 'file-end') {
-      const f = this.incomingFiles[d.tid];
-      if (!f) return;
-      const blob = new Blob(f.chunks);
-      const ts = Date.now();
-      saveFile(d.tid, blob, f.name, ts).then(() => {
-        if (!this.chats[pid]) this.chats[pid] = [];
-        const msg: ChatMessage = { id: crypto.randomUUID(), dir: 'recv', type: 'file', name: f.name, tid: d.tid, size: f.size, ts };
-        this.chats[pid].push(msg);
-        saveChats(this.chats);
-        delete this.incomingFiles[d.tid];
-        if (conn.open) conn.send({ type: 'file-ack', tid: d.tid });
-        const fileFname = this.contacts[pid]?.friendlyName || 'Someone';
-        this.notify(fileFname, `Sent you a file: ${f.name}`, `file-${pid}`);
-        this.log(`File received: ${f.name}`, 'ok');
-        this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
-      });
-    }
-
-    if (d.type === 'file-ack') {
-      const msgs = this.chats[pid];
-      if (msgs) {
-        const msg = msgs.find(m => m.tid === d.tid && m.dir === 'sent');
-        if (msg) {
-          msg.status = 'delivered';
-          saveChats(this.chats);
-          this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-        }
-      }
-    }
-
-    if (d.type === 'name-update' && d.name) {
-      if (this.contacts[pid]) {
-        this.contacts[pid].friendlyName = d.name;
-        saveContacts(this.contacts);
-        this.emitPeerListUpdate();
-        this.log(`${d.name} updated their name`, 'info');
-      }
-    }
-  }
-
-  private async flushMessageQueue(pid: string) {
-    const c = this.contacts[pid];
-    if (!c || !c.conn || !c.conn.open) return;
-
-    const queue = this.chats[pid]?.filter(m => m.dir === 'sent' && (m.status === 'waiting' || m.status === 'failed')) || [];
-    let updated = false;
-    for (const msg of queue) {
-      if (msg.type === 'text') {
-        await this.sendEncryptedMessage(pid, c.conn, msg);
-        msg.status = 'sent';
-        updated = true;
-      }
-    }
-    if (updated) {
-      saveChats(this.chats);
-      this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-    }
-    delete this.connectFailures[pid];
-
-    const files = this.pendingFiles[pid];
-    if (files?.length) {
-      files.forEach(file => this._sendFileNow(pid, file, c.conn));
-      delete this.pendingFiles[pid];
-    }
-  }
+  /** @internal */ public async flushMessageQueue(contactKey: string) { _flushMessageQueue(this, contactKey); }
 
   // ─── Public API ───────────────────────────────────────────────────────────
 
-  public async editMessage(pid: string, id: string, content: string) {
-    const msgs = this.chats[pid];
+  public async editMessage(contactKey: string, id: string, content: string) {
+    const msgs = this.chats[contactKey];
     if (!msgs) return;
     const msg = msgs.find(m => m.id === id && m.dir === 'sent');
     if (!msg || msg.deleted) return;
     msg.content = content;
     msg.edited = true;
     saveChats(this.chats);
-    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-    const conn = this.contacts[pid]?.conn;
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid: contactKey } }));
+    const conn = this.contacts[contactKey]?.conn;
     if (conn?.open) {
-      const sk = await this.getOrDeriveSharedKey(pid);
+      const sk = await this.getOrDeriveSharedKey(contactKey);
       if (sk && this.privateKey) {
         try {
           const { iv, ct } = await encryptMessage(sk.key, content);
@@ -2072,36 +884,38 @@ export class P2PManager extends EventTarget {
     }
   }
 
-  public deleteMessage(pid: string, id: string) {
-    const msgs = this.chats[pid];
+  public deleteMessage(contactKey: string, id: string) {
+    const msgs = this.chats[contactKey];
     if (!msgs) return;
     const msg = msgs.find(m => m.id === id && m.dir === 'sent');
     if (!msg) return;
     msg.content = '';
     msg.deleted = true;
     saveChats(this.chats);
-    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-    const conn = this.contacts[pid]?.conn;
-    if (conn?.open) conn.send({ type: 'message-delete', id });
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid: contactKey } }));
+    const conn = this.contacts[contactKey]?.conn;
+    if (conn?.open) conn.send({ type: 'message-delete', id, tid: msg.tid });
   }
 
-  public retryMessage(pid: string, id: string) {
-    const msgs = this.chats[pid];
+  public retryMessage(contactKey: string, id: string) {
+    const msgs = this.chats[contactKey];
     if (!msgs) return;
     const msg = msgs.find(m => m.id === id && m.dir === 'sent' && m.status === 'failed');
     if (!msg) return;
     msg.status = 'waiting';
+    const c = this.contacts[contactKey];
+    const pid = c?.currentPID || contactKey;
     delete this.connectFailures[pid];
     saveChats(this.chats);
-    this.dispatchEvent(new CustomEvent('message', { detail: { pid } }));
-    const c = this.contacts[pid];
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid: contactKey } }));
     if (c) this.connectPersistent(pid, c.friendlyName);
   }
 
-  public acceptIncomingRequest(pid: string) {
-    const c = this.contacts[pid];
+  public acceptIncomingRequest(contactKey: string) {
+    const c = this.contacts[contactKey];
     if (!c || c.pending !== 'incoming') return;
     const fname = c.friendlyName;
+    const pid = c.currentPID || contactKey;
     delete c.pending;
     saveContacts(this.contacts);
     this.emitPeerListUpdate();
@@ -2113,7 +927,7 @@ export class P2PManager extends EventTarget {
     this.friendlyName = name;
     localStorage.setItem(`${APP_PREFIX}-name`, name);
     // Broadcast to all open connections
-    Object.values(this.contacts).forEach(c => {
+    Object.values(this.contacts).forEach((c: Contact) => {
       if (c.conn?.open) c.conn.send({ type: 'name-update', name });
     });
     // Re-checkin to public namespace router
@@ -2138,21 +952,25 @@ export class P2PManager extends EventTarget {
     this.log(`Name updated to: ${name}`, 'ok');
   }
 
-  public deleteContact(pid: string) {
-    const c = this.contacts[pid];
+  public deleteContact(contactKey: string) {
+    const c = this.contacts[contactKey];
     if (c?.conn?.open) try { c.conn.close(); } catch {}
-    delete this.contacts[pid];
-    delete this.chats[pid];
+    // Remove pidToFP mappings
+    c?.knownPIDs?.forEach(pid => this.pidToFP.delete(pid));
+    if (c?.currentPID) this.pidToFP.delete(c.currentPID);
+    this.sharedKeys.delete(contactKey);
+    delete this.contacts[contactKey];
+    delete this.chats[contactKey];
     saveContacts(this.contacts);
     saveChats(this.chats);
     this.emitPeerListUpdate();
-    this.log(`Deleted contact: ${pid}`, 'info');
+    this.log(`Deleted contact: ${contactKey}`, 'info');
   }
 
-  public pingContact(pid: string): Promise<'online' | 'offline'> {
+  public pingContact(contactKey: string): Promise<'online' | 'offline'> {
     return new Promise((resolve) => {
       if (!this.persPeer) return resolve('offline');
-      const c = this.contacts[pid];
+      const c = this.contacts[contactKey];
       if (!c) return resolve('offline');
 
       if (c.conn?.open) {
@@ -2160,6 +978,7 @@ export class P2PManager extends EventTarget {
         return;
       }
 
+      const pid = c.currentPID || contactKey;
       const conn = this.persPeer.connect(pid, { reliable: true });
       const timer = setTimeout(() => {
         conn.close();
@@ -2169,8 +988,8 @@ export class P2PManager extends EventTarget {
 
       conn.on('open', async () => {
         clearTimeout(timer);
-        if (!this.contacts[pid]) this.contacts[pid] = c;
-        this.contacts[pid].conn = conn;
+        if (!this.contacts[contactKey]) this.contacts[contactKey] = c;
+        this.contacts[contactKey].conn = conn;
         const ts = Date.now().toString();
         const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
         conn.send({ type: 'hello', friendlyname: this.friendlyName, publicKey: this.publicKeyStr, ts, signature });
@@ -2181,7 +1000,7 @@ export class P2PManager extends EventTarget {
 
       conn.on('data', (d) => this.handlePersistentData(d, conn));
       conn.on('close', () => {
-        if (this.contacts[pid]) { this.contacts[pid].conn = null; this.emitPeerListUpdate(); }
+        if (this.contacts[contactKey]) { this.contacts[contactKey].conn = null; this.emitPeerListUpdate(); }
       });
       conn.on('error', () => {
         clearTimeout(timer);
@@ -2190,95 +1009,72 @@ export class P2PManager extends EventTarget {
     });
   }
 
-  public async sendMessage(pid: string, content: string) {
-    const c = this.contacts[pid];
+  public async sendMessage(contactKey: string, content: string) {
+    const c = this.contacts[contactKey];
     const msg: ChatMessage = { id: crypto.randomUUID(), dir: 'sent', content, ts: Date.now(), type: 'text', status: 'waiting' };
 
-    if (!this.chats[pid]) this.chats[pid] = [];
-    this.chats[pid].push(msg);
+    if (!this.chats[contactKey]) this.chats[contactKey] = [];
+    this.chats[contactKey].push(msg);
     saveChats(this.chats);
 
     if (c && c.conn && c.conn.open) {
-      await this.sendEncryptedMessage(pid, c.conn, msg);
+      await this.sendEncryptedMessage(contactKey, c.conn, msg);
       msg.status = 'sent';
       saveChats(this.chats);
     } else if (c) {
       if (c.conn && !c.conn.open) c.conn = null;
+      const pid = c.currentPID || contactKey;
       this.connectPersistent(pid, c.friendlyName);
     }
-    this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid: contactKey, msg } }));
   }
 
   /** Send a text message, encrypting with shared key if available */
-  private async sendEncryptedMessage(pid: string, conn: DataConnection, msg: ChatMessage) {
-    const sk = await this.getOrDeriveSharedKey(pid);
-    if (sk && this.privateKey) {
-      try {
-        const { iv, ct } = await encryptMessage(sk.key, msg.content || '');
-        const sig = await signData(this.privateKey, ct);
-        conn.send({ type: 'message', iv, ct, sig, ts: msg.ts, id: msg.id, e2e: true });
-        return;
-      } catch (e) {
-        this.log(`E2E encrypt failed for ${pid}, sending plaintext`, 'err');
-      }
-    }
-    // Fallback: plaintext
-    conn.send({ type: 'message', content: msg.content, ts: msg.ts, id: msg.id });
-  }
+  /** @internal */ public async sendEncryptedMessage(contactKey: string, conn: DataConnection, msg: ChatMessage) { _sendEncryptedMessage(this, contactKey, conn, msg); }
 
-  public sendFile(pid: string, file: File) {
-    const c = this.contacts[pid];
+  public sendFile(contactKey: string, file: File) {
+    const c = this.contacts[contactKey];
     if (!c) return;
 
     if (!c.conn || !c.conn.open) {
-      if (!this.pendingFiles[pid]) this.pendingFiles[pid] = [];
-      this.pendingFiles[pid].push(file);
+      if (!this.pendingFiles[contactKey]) this.pendingFiles[contactKey] = [];
+      this.pendingFiles[contactKey].push(file);
       this.log(`File queued (offline): ${file.name}`, 'info');
-      if (!c.conn) this.connectPersistent(pid, c.friendlyName);
+      if (!c.conn) {
+        const pid = c.currentPID || contactKey;
+        this.connectPersistent(pid, c.friendlyName);
+      }
       return;
     }
 
-    this._sendFileNow(pid, file, c.conn);
+    this._sendFileNow(contactKey, file, c.conn);
   }
 
-  private _sendFileNow(pid: string, file: File, conn: DataConnection) {
-    const tid = crypto.randomUUID().replace(/-/g, '');
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const buf = e.target?.result as ArrayBuffer;
-      const total = Math.ceil(buf.byteLength / CHUNK_SIZE);
-      conn.send({ type: 'file-start', tid, name: file.name, size: buf.byteLength, total });
+  /** @internal */ public _sendFileNow(contactKey: string, file: File, conn: DataConnection) { __sendFileNow(this, contactKey, file, conn); }
 
-      for (let i = 0; i < total; i++) {
-        conn.send({
-          type: 'file-chunk',
-          tid,
-          index: i,
-          chunk: buf.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE)
-        });
-      }
-      conn.send({ type: 'file-end', tid });
-
-      const blob = new Blob([buf]);
-      await saveFile(tid, blob, file.name, Date.now());
-
-      if (!this.chats[pid]) this.chats[pid] = [];
-      const msg: ChatMessage = { id: crypto.randomUUID(), dir: 'sent', type: 'file', name: file.name, tid, size: file.size, ts: Date.now(), status: 'sent' };
-      this.chats[pid].push(msg);
-      saveChats(this.chats);
-      this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
-      this.log(`Sent: ${file.name}`, 'ok');
-    };
-    reader.readAsArrayBuffer(file);
-  }
-
-  public async startCall(pid: string, kind: 'audio' | 'video' | 'screen') {
+  public async startCall(contactKey: string, kind: 'audio' | 'video' | 'screen') {
     if (!this.persPeer) throw new Error('Not initialized');
+    const c = this.contacts[contactKey];
+    const pid = c?.currentPID || contactKey;
 
     if (kind === 'screen' && !navigator.mediaDevices?.getDisplayMedia) {
       const err = new Error('Screen sharing is not supported on this browser. On Android, use a desktop browser.');
       this.log(err.message, 'err');
       throw err;
+    }
+
+    // Pre-check: ensure signaling is alive (required for PeerJS call delivery)
+    if (this.persPeer.disconnected) {
+      this.log('Signaling disconnected — reconnecting before call', 'info');
+      this.schedulePersReconnect();
+      throw new Error('Signaling disconnected — reconnecting. Please try again in a moment.');
+    }
+
+    // Send call-notify via DataConnection as a reliable pre-call heads-up.
+    // DataConnection (WebRTC direct) survives even when signaling is stale,
+    // and this wakes up the callee's signaling if needed.
+    if (c?.conn?.open) {
+      c.conn.send({ type: 'call-notify', kind, from: this.persistentID });
     }
 
     try {
@@ -2304,16 +1100,37 @@ export class P2PManager extends EventTarget {
     }
   }
 
-  private handleIncomingCall(call: MediaConnection) {
+  /** @internal */ public handleIncomingCall(call: MediaConnection) {
     const pid = call.peer;
-    const fname = this.contacts[pid]?.friendlyName || pid;
+
+    // Group call auto-answer: check metadata matches our active group call
+    // Don't rely on participants list — it may not be updated yet due to router relay latency
+    if (call.metadata?.groupCall && this.activeGroupCallId && this.groupCallLocalStream) {
+      const metaGroupId = call.metadata.groupId;
+      if (metaGroupId === this.activeGroupCallId) {
+        this.log(`Auto-answering group call from ${pid.slice(-8)}`, 'info');
+        _groupCallAutoAnswer(this, call);
+        return;
+      }
+    }
+
+    const ck = this.contactKeyForPID(pid);
+    const fname = this.contacts[ck]?.friendlyName || pid;
     const kind = call.metadata?.kind || 'video';
-    this.notify(`Incoming ${kind} call`, `${fname} is calling`, 'incoming-call');
+    this.log(`Incoming ${kind} call from ${fname} (PID: ${pid.slice(-8)}, key: ${ck.slice(-8)})`, 'info');
+    // ACK: tell caller we received the call notification
+    const conn = this.contacts[ck]?.conn;
+    if (conn?.open) {
+      conn.send({ type: 'call-received', kind });
+    } else {
+      this.log('No open DataConnection for call-received ACK', 'info');
+    }
+    this.notify(`Incoming ${kind} call`, `${fname} is calling`, `call-${ck}`);
     this.dispatchEvent(new CustomEvent('incoming-call', { detail: { call, fname, kind } }));
   }
 
-  public addCallLog(pid: string, dir: 'sent' | 'recv', callKind: 'audio' | 'video' | 'screen', callResult: 'answered' | 'missed' | 'rejected' | 'cancelled', callDuration?: number) {
-    if (!this.chats[pid]) this.chats[pid] = [];
+  public addCallLog(contactKey: string, dir: 'sent' | 'recv', callKind: 'audio' | 'video' | 'screen', callResult: 'answered' | 'missed' | 'rejected' | 'cancelled', callDuration?: number) {
+    if (!this.chats[contactKey]) this.chats[contactKey] = [];
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
       dir,
@@ -2323,12 +1140,12 @@ export class P2PManager extends EventTarget {
       callResult,
       callDuration,
     };
-    this.chats[pid].push(msg);
+    this.chats[contactKey].push(msg);
     saveChats(this.chats);
-    this.dispatchEvent(new CustomEvent('message', { detail: { pid, msg } }));
+    this.dispatchEvent(new CustomEvent('message', { detail: { pid: contactKey, msg } }));
   }
 
-  private emitPeerListUpdate() {
+  /** @internal */ public emitPeerListUpdate() {
     this.dispatchEvent(new CustomEvent('peer-list-update'));
   }
 
@@ -2337,224 +1154,137 @@ export class P2PManager extends EventTarget {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /** Start the rendezvous system — called from _init() after cnsRestoreSaved() */
-  private rvzStart() {
-    if (this.rvzSweepTimer) clearInterval(this.rvzSweepTimer);
-    this.rvzSweepTimer = setInterval(() => this.rvzSweep(), RVZ_SWEEP_IV);
-    // Initial sweep after 30s (let contacts establish first)
-    if (this.rvzInitTimer) clearTimeout(this.rvzInitTimer);
-    this.rvzInitTimer = setTimeout(() => { this.rvzInitTimer = null; this.rvzSweep(); }, 30000);
-  }
+  /** @internal */ public rvzStart() { _rvzStart(this); }
 
   /** Scan contacts for unreachable peers and queue them for rendezvous */
-  private rvzSweep() {
-    if (this.offlineMode) return;
-    Object.keys(this.contacts).forEach(pid => {
-      const c = this.contacts[pid];
-      if (c.conn?.open) return;            // already connected
-      if (c.pending) return;               // not yet accepted
-      if (!c.publicKey) return;            // need pubkey for shared key derivation
-      if (this.rvzQueue.includes(pid)) return; // already queued
-      if (this.rvzActive === pid) return;  // currently active
-      if (this.connectingPIDs.has(pid)) return; // currently trying persistent
-      this.rvzQueue.push(pid);
-    });
-    if (!this.rvzActive && this.rvzQueue.length > 0) {
-      this.rvzProcessNext();
-    }
-  }
+  /** @internal */ public rvzSweep() { _rvzSweep(this); }
 
   /** Pop next contact from queue and start rendezvous namespace */
-  private async rvzProcessNext() {
-    if (this.rvzActive) return;
-    if (this.rvzQueue.length === 0) return;
-
-    const pid = this.rvzQueue.shift()!;
-    // Skip if already connected
-    if (this.contacts[pid]?.conn?.open) {
-      this.rvzProcessNext();
-      return;
-    }
-
-    const sk = await this.getOrDeriveSharedKey(pid);
-    if (!sk) {
-      this.rvzProcessNext();
-      return;
-    }
-
-    const timeWindow = Math.floor(Date.now() / RVZ_WINDOW);
-    let slug: string;
-    try {
-      slug = await deriveRendezvousSlug(sk.key, timeWindow);
-    } catch (e) {
-      this.log(`Rendezvous slug derivation failed for ${this.contacts[pid]?.friendlyName}: ${e}`, 'err');
-      this.rvzProcessNext();
-      return;
-    }
-
-    this.rvzActive = pid;
-    const fname = this.contacts[pid]?.friendlyName || pid.slice(-8);
-    this.log(`Rendezvous: checking namespace for ${fname} (window ${timeWindow})`, 'info');
-
-    this.rvzCfg = {
-      label: `rvz:${fname.slice(0, 12)}`,
-      makeRouterID: (level) => makeRendezvousRouterID(slug, level),
-      makeDiscID: (uuid) => makeRendezvousDiscID(slug, uuid),
-      makePeerSlotID: () => makeRendezvousPeerSlotID(slug),
-    };
-
-    this.rvzState = makeNSState();
-    this.nsAttempt(this.rvzState, this.rvzCfg, 1);
-
-    // Window expiry: move to next contact after current time window ends
-    const remaining = RVZ_WINDOW - (Date.now() % RVZ_WINDOW);
-    this.rvzWindowTimer = setTimeout(() => this.rvzOnWindowExpire(), remaining + 2000);
-  }
+  /** @internal */ public async rvzProcessNext() { _rvzProcessNext(this); }
 
   /** Time window expired — re-queue if still unreachable, move to next contact */
-  private rvzOnWindowExpire() {
-    const pid = this.rvzActive;
-    if (pid && this.contacts[pid] && !this.contacts[pid].conn?.open) {
-      // Re-queue at end for next round
-      if (!this.rvzQueue.includes(pid)) this.rvzQueue.push(pid);
-    }
-    this.rvzCleanupActive();
-    this.rvzProcessNext();
-  }
+  /** @internal */ public rvzOnWindowExpire() { _rvzOnWindowExpire(this); }
 
   /** Cleanup the currently active rendezvous (but keep timers for sweep/queue) */
-  private rvzCleanupActive() {
-    if (this.rvzState) {
-      this.nsTeardown(this.rvzState);
-      this.rvzState = null;
-    }
-    this.rvzCfg = null;
-    this.rvzActive = null;
-    if (this.rvzWindowTimer) { clearTimeout(this.rvzWindowTimer); this.rvzWindowTimer = null; }
-  }
+  /** @internal */ public rvzCleanupActive() { _rvzCleanupActive(this); }
 
   /** Full teardown of rendezvous system */
-  private rvzTeardown() {
-    this.rvzCleanupActive();
-    this.rvzQueue = [];
-    if (this.rvzSweepTimer) { clearInterval(this.rvzSweepTimer); this.rvzSweepTimer = null; }
-    if (this.rvzInitTimer) { clearTimeout(this.rvzInitTimer); this.rvzInitTimer = null; }
-  }
+  /** @internal */ public rvzTeardown() { _rvzTeardown(this); }
 
   /** Called from nsMergeRegistry when registry updates for the rendezvous namespace.
    *  Looks for the target contact by publicKey match. */
-  private rvzCheckRegistry(s: NSState) {
-    if (!this.rvzActive) return;
-    const pid = this.rvzActive;
-    const contact = this.contacts[pid];
-    if (!contact?.publicKey) return;
-
-    // Look for a registry entry with matching publicKey (not our own)
-    const match = Object.values(s.registry).find(
-      r => !r.isMe && r.publicKey && r.publicKey === contact.publicKey
-    );
-    if (!match) return;
-
-    this.log(`Rendezvous: found ${contact.friendlyName} in namespace — exchanging PIDs`, 'ok');
-
-    // Connect to their discovery peer and send rvz-exchange
-    const peer = s.discPeer || this.persPeer;
-    if (!peer || peer.destroyed) return;
-
-    const conn = peer.connect(match.discoveryID, { reliable: true });
-    conn.on('open', async () => {
-      const ts = Date.now().toString();
-      const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
-      conn.send({
-        type: 'rvz-exchange',
-        persistentID: this.persistentID,
-        friendlyName: this.friendlyName,
-        publicKey: this.publicKeyStr,
-        ts,
-        signature,
-      });
-    });
-
-    conn.on('data', (d: any) => {
-      if (d.type === 'rvz-exchange') {
-        this.rvzHandleExchange(d, conn, pid);
-      }
-    });
-
-    conn.on('error', () => {
-      this.log(`Rendezvous: failed to connect to ${contact.friendlyName}'s disc peer`, 'err');
-    });
-  }
+  /** @internal */ public rvzCheckRegistry(s: NSState) { _rvzCheckRegistry(this, s); }
 
   /** Handle incoming rendezvous exchange — update PID if changed, reconnect */
-  private async rvzHandleExchange(d: any, conn: DataConnection, expectedPID?: string) {
-    // Verify signature
-    if (d.publicKey && d.signature && d.ts && window.crypto?.subtle) {
-      try {
-        const key = await importPublicKey(d.publicKey);
-        const valid = await verifySignature(key, d.signature, d.ts);
-        if (!valid) {
-          this.log('Rendezvous: invalid signature on exchange', 'err');
-          conn.close();
-          return;
-        }
-      } catch {
-        this.log('Rendezvous: signature verification error', 'err');
-        conn.close();
-        return;
-      }
-    }
-
-    const newPID = d.persistentID;
-    const fname = d.friendlyName || 'Unknown';
-
-    // Find the contact by publicKey match
-    const oldPID = expectedPID || (d.publicKey ? this.findContactByPublicKey(d.publicKey) : null);
-
-    if (oldPID && oldPID !== newPID) {
-      this.log(`Rendezvous: ${fname} PID changed ${oldPID.slice(-8)} → ${newPID.slice(-8)}`, 'info');
-      this.migrateContact(oldPID, newPID);
-    } else if (!oldPID && newPID) {
-      // Unknown contact found via rendezvous — shouldn't happen but handle gracefully
-      this.log(`Rendezvous: unexpected peer ${fname} (${newPID.slice(-8)})`, 'info');
-    }
-
-    // Send our exchange back if they haven't gotten ours
-    if (conn.open) {
-      const ts = Date.now().toString();
-      const signature = this.privateKey ? await signData(this.privateKey, ts) : '';
-      conn.send({
-        type: 'rvz-exchange',
-        persistentID: this.persistentID,
-        friendlyName: this.friendlyName,
-        publicKey: this.publicKeyStr,
-        ts,
-        signature,
-      });
-      setTimeout(() => { try { conn.close(); } catch {} }, 1000);
-    }
-
-    // Cleanup rendezvous and connect normally
-    this.rvzCleanupActive();
-    // Remove from queue too
-    this.rvzQueue = this.rvzQueue.filter(p => p !== newPID && p !== oldPID);
-
-    // Connect via persistent channel
-    if (this.contacts[newPID]) {
-      delete this.connectFailures[newPID];
-      this.connectPersistent(newPID, fname);
-    }
-
-    // Continue with remaining queue
-    this.rvzProcessNext();
-  }
+  /** @internal */ public async rvzHandleExchange(d: any, conn: DataConnection) { _rvzHandleExchange(this, d, conn); }
 
   /** Add a PID to the rendezvous queue (called from connectPersistent error path) */
-  private rvzEnqueue(pid: string) {
-    if (!this.contacts[pid]?.publicKey) return; // need pubkey for rendezvous
-    if (this.rvzQueue.includes(pid) || this.rvzActive === pid) return;
-    this.rvzQueue.push(pid);
-    this.log(`Rendezvous: queued ${this.contacts[pid]?.friendlyName || pid.slice(-8)}`, 'info');
-    if (!this.rvzActive) this.rvzProcessNext();
+  /** @internal */ public rvzEnqueue(contactKey: string) { _rvzEnqueue(this, contactKey); }
+
+  /** Clean up rvz state when a contact connects (from any path) */
+  /** @internal */ public rvzContactConnected(contactKey: string) { _rvzContactConnected(this, contactKey); }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══ Group Chat Public API ════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  public async groupCreate(name: string, inviteSlug?: string): Promise<string> { return _groupCreate(this, name, inviteSlug); }
+  public async groupJoin(groupId: string, info?: any) { _groupJoin(this, groupId, info); }
+  public groupJoinBySlug(slug: string) { _groupJoinBySlug(this, slug); }
+  public groupLeave(groupId: string) { _groupLeave(this, groupId); }
+  public async groupSendMessage(groupId: string, content: string, type?: 'text' | 'system') { _groupSendMessage(this, groupId, content, type); }
+  public async groupEditMessage(groupId: string, msgId: string, content: string) { _groupEditMessage(this, groupId, msgId, content); }
+  public groupDeleteMessage(groupId: string, msgId: string) { _groupDeleteMessage(this, groupId, msgId); }
+  public async groupRetryMessage(groupId: string, msgId: string) { _groupRetryMessage(this, groupId, msgId); }
+  public groupSendFile(groupId: string, file: File) { _groupSendFile(this, groupId, file); }
+  public async groupInvite(groupId: string, contactKey: string) { _groupInvite(this, groupId, contactKey); }
+  public async groupKickMember(groupId: string, targetFP: string) { _groupKickMember(this, groupId, targetFP); }
+  /** @internal */ public async groupHandleInvite(d: any) { _groupHandleInvite(this, d); }
+  /** @internal */ public groupHandleNSData(groupId: string, d: any, conn: any) { _groupHandleNSData(this, groupId, d, conn); }
+  /** @internal */ public groupSendCheckin(groupId: string) { _groupSendCheckin(this, groupId); }
+  /** @internal */ public groupSave() { _groupSave(this); }
+  /** @internal */ public async groupRestore() { _groupRestore(this); }
+  /** @internal */ public groupEmit() { _groupEmit(this); }
+
+  // ─── Group Call Public API ────────────────────────────────────────────────
+  public async groupCallStart(groupId: string, kind: 'audio' | 'video' | 'screen') { _groupCallStart(this, groupId, kind); }
+  public async groupCallJoin(groupId: string) { _groupCallJoin(this, groupId); }
+  public groupCallLeave(groupId?: string) { _groupCallLeave(this, groupId); }
+  public async groupCallToggleCamera(): Promise<boolean> { return _groupCallToggleCamera(this); }
+  public async groupCallToggleScreen(): Promise<boolean> { return _groupCallToggleScreen(this); }
+
+  /** Check if a PeerJS PID is a participant in the active group call */
+  public isGroupCallParticipant(pid: string): boolean {
+    if (!this.activeGroupCallId) return false;
+    const state = this.groups.get(this.activeGroupCallId);
+    if (!state?.activeCall) return false;
+    return Object.values(state.activeCall.participants).some(p => p.pid === pid);
+  }
+
+  /** Get active group call info for UI */
+  public get activeGroupCallInfo(): { groupId: string; info: GroupCallInfo; groupName: string } | null {
+    if (!this.activeGroupCallId) return null;
+    const state = this.groups.get(this.activeGroupCallId);
+    if (!state?.activeCall) return null;
+    return { groupId: this.activeGroupCallId, info: state.activeCall, groupName: state.info.name };
+  }
+
+  public get groupList(): Record<string, { info: any; messages: any[]; isRouter: boolean; level: number; memberCount: number; activeCall?: GroupCallInfo }> {
+    const out: Record<string, any> = {};
+    this.groups.forEach((s, id) => {
+      out[id] = {
+        info: s.info,
+        messages: s.messages,
+        isRouter: s.isRouter,
+        level: s.level,
+        memberCount: Object.keys(s.info.members).length,
+        activeCall: s.activeCall || undefined,
+      };
+    });
+    return out;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══ Geo Discovery Public API ═════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  public geoStart() { _geoStart(this); }
+  public geoStop() { _geoStop(this); }
+  public geoRefresh() { _geoRefresh(this); }
+  /** @internal */ public geoUpdatePosition(lat: number, lng: number, accuracy: number) { _geoUpdatePosition(this, lat, lng, accuracy); }
+  public geoGetNearbyPeers(): { peer: any; overlapCount: number; totalHashes: number }[] { return _geoGetNearbyPeers(this); }
+
+  public get geoActive(): boolean { return this.geoWatchId !== null; }
+
+  /** Detailed geo state for debug UI */
+  public get geoDebugInfo(): {
+    geohash: string;
+    isRouter: boolean;
+    level: number;
+    joinStatus: string | null;
+    joinAttempt: number;
+    routerID: string;
+    discID: string;
+    peerSlotID: string;
+    peers: { discoveryID: string; friendlyName: string; publicKey?: string; isMe?: boolean; lastSeen: number }[];
+  }[] {
+    return this.geoStates.map(s => ({
+      geohash: s.geohash,
+      isRouter: s.isRouter,
+      level: s.level,
+      joinStatus: s.joinStatus,
+      joinAttempt: s.joinAttempt,
+      routerID: s.cfg.makeRouterID(s.level || 1),
+      discID: s.cfg.makeDiscID(this.discoveryUUID),
+      peerSlotID: s.cfg.makePeerSlotID(),
+      peers: Object.values(s.registry).map(r => ({
+        discoveryID: r.discoveryID,
+        friendlyName: r.friendlyName,
+        publicKey: r.publicKey,
+        isMe: r.isMe,
+        lastSeen: r.lastSeen,
+      })),
+    }));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2646,11 +1376,14 @@ export class P2PManager extends EventTarget {
   private cnsRestoreSaved() {
     try {
       const saved = JSON.parse(localStorage.getItem(`${APP_PREFIX}-custom-ns`) || '[]') as { name: string; offline?: boolean; advanced?: boolean }[];
-      saved.forEach(({ name, offline, advanced }) => {
+      saved.forEach(({ name, offline, advanced }, i) => {
         const slug = advanced ? name : slugifyNamespace(name);
         if (!this.cns.has(slug)) {
-          this.joinCustomNamespace(name, advanced);
-          if (offline) this.setCustomNSOffline(slug, true);
+          // Stagger joins to avoid signaling rate-limit
+          setTimeout(() => {
+            this.joinCustomNamespace(name, advanced);
+            if (offline) this.setCustomNSOffline(slug, true);
+          }, (i + 1) * 1500);
         }
       });
     } catch {}

@@ -1,6 +1,6 @@
 import React from 'react';
-import { X, ExternalLink } from 'lucide-react';
-import { APP_NAME, APP_PREFIX } from '../lib/types';
+import { X, ExternalLink, Shield, Users, MapPin, Wifi, Globe, Lock, Phone, RefreshCw, Code } from 'lucide-react';
+import { APP_NAME } from '../lib/types';
 import { BUILD } from '../lib/version';
 
 interface LearnMoreProps {
@@ -27,57 +27,103 @@ export function LearnMore({ onClose }: LearnMoreProps) {
 
         <div className="px-5 py-4 space-y-5 text-[13px] leading-relaxed">
 
-          {/* Simple explanation */}
+          {/* What is it */}
           <section>
-            <h3 className="text-sm font-semibold text-gray-200 mb-2">What is this?</h3>
+            <h3 className="text-sm font-semibold text-gray-200 mb-2">What is {APP_NAME}?</h3>
             <p className="text-gray-400">
-              A <span className="text-white font-medium">fully serverless</span> peer-to-peer chat app that runs entirely in your browser. There are no accounts, no servers storing your messages, and no middlemen. You connect directly to other people using WebRTC — the same technology that powers video calls in your browser.
-            </p>
-          </section>
-
-          <section>
-            <h3 className="text-sm font-semibold text-gray-200 mb-2">How do people find each other?</h3>
-            <p className="text-gray-400">
-              When you open the app, it detects your public IP and joins a <span className="text-white font-medium">discovery namespace</span> — a shared meeting space for everyone on your network. You can also join <span className="text-white font-medium">custom namespaces</span> by typing any name (like "office" or "family"), which work across different networks.
+              A private messaging app that connects you <span className="text-white font-medium">directly to other people</span> — no middlemen, no accounts, no data collection. Your messages, calls, and files go straight from your device to theirs using encrypted peer-to-peer connections.
             </p>
             <p className="text-gray-400 mt-2">
-              Inside each namespace, the app automatically elects a <span className="text-white font-medium">router</span> — the first device to claim the slot. The router keeps a registry of who's online and broadcasts it to everyone. If the router leaves, another device takes over seamlessly.
+              The app itself is just a website — there are no servers involved in running it. A small signaling service (powered by <span className="text-white font-medium">PeerJS</span>) helps devices find each other initially, but never sees your messages or data.
             </p>
           </section>
 
+          {/* Features */}
           <section>
-            <h3 className="text-sm font-semibold text-gray-200 mb-2">How is identity verified?</h3>
-            <p className="text-gray-400">
-              Each device generates a unique <span className="text-white font-medium">ECDSA key pair</span> on first use. Your public key serves as your identity. When someone sends you a connection request, the app verifies the request signature using their public key — so you can confirm you're talking to who you think you are, without trusting any server.
-            </p>
+            <h3 className="text-sm font-semibold text-gray-200 mb-3">What makes it unique</h3>
+            <div className="space-y-3">
+
+              <div className="flex gap-3">
+                <Shield size={16} className="text-green-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">End-to-end encrypted everything</p>
+                  <p className="text-gray-500 text-[12px]">Messages, group chats, calls, and files are all encrypted. Each device generates its own cryptographic identity — nobody, not even {APP_NAME}, can read your conversations.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <Wifi size={16} className="text-blue-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">Same-network discovery</p>
+                  <p className="text-gray-500 text-[12px]">People on the same Wi-Fi or network are automatically discovered — no need to exchange IDs. Just open the app and you'll see who's nearby.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <MapPin size={16} className="text-purple-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">GPS nearby discovery</p>
+                  <p className="text-gray-500 text-[12px]">Find people physically nearby — even on different networks — using location-based discovery. Great for events, conferences, or public spaces. Your exact location is never shared; only a coarse area code is used.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <Globe size={16} className="text-cyan-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">Custom namespaces</p>
+                  <p className="text-gray-500 text-[12px]">Create or join shared spaces by name — like "office", "family", or "hackathon". Anyone who joins the same namespace can discover each other, no matter what network they're on.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <Users size={16} className="text-orange-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">Encrypted group chats & calls</p>
+                  <p className="text-gray-500 text-[12px]">Create group chats with end-to-end encryption. Start group audio or video calls. Invite members, share files, and manage your group — all without any server.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <Phone size={16} className="text-green-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">Voice & video calls</p>
+                  <p className="text-gray-500 text-[12px]">Call any contact directly — audio, video, or screen share. Calls are peer-to-peer with no server in between.</p>
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                <RefreshCw size={16} className="text-yellow-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-gray-200 font-medium text-[13px]">Instant reconnect</p>
+                  <p className="text-gray-500 text-[12px]">When you and a contact both come back online, you reconnect automatically and instantly — no manual steps needed. Queued messages are delivered as soon as the connection is restored.</p>
+                </div>
+              </div>
+
+            </div>
           </section>
 
-          <section>
-            <h3 className="text-sm font-semibold text-gray-200 mb-2">What about saved contacts?</h3>
-            <p className="text-gray-400">
-              Once you accept a connection, the contact is saved with their public key and persistent ID. You can reconnect with them from any network — the app uses a signaling server only to establish the initial WebRTC connection, then all messages flow directly peer-to-peer.
-            </p>
-          </section>
-
-          {/* Technical section */}
+          {/* How it works */}
           <section className="border-t border-gray-800 pt-4">
-            <h3 className="text-sm font-semibold text-gray-300 mb-2">Technical Details</h3>
-            <div className="text-gray-500 text-[12px] space-y-2">
-              <p>
-                <span className="text-gray-400 font-medium">Signaling:</span> PeerJS (<code className="text-cyan-600">0.peerjs.com</code>) is used only for WebRTC signaling — the initial handshake to establish direct connections. No message content passes through the signaling server. The name {APP_NAME} is a riff on PeerJS.
-              </p>
-              <p>
-                <span className="text-gray-400 font-medium">Routing:</span> Namespace routing uses a novel first-to-claim, self-managed mesh protocol. A deterministic PeerJS ID (e.g. <code className="text-cyan-600">{APP_PREFIX}-ns-office-1</code>) is claimed by the first peer to register it. This becomes the L1 router. If taken, peers escalate to L2, L3, etc. (up to L5), with automatic level-down migration when lower levels free up.
-              </p>
-              <p>
-                <span className="text-gray-400 font-medium">Identity:</span> ECDSA P-256 key pairs generated via Web Crypto API. Public keys are exchanged during the handshake. Connection requests include a signed timestamp verified by the recipient. Key fingerprints are SHA-256 of the public key (first 8 bytes).
-              </p>
-              <p>
-                <span className="text-gray-400 font-medium">Storage:</span> All data (contacts, messages, keys, files) stored locally in localStorage and IndexedDB. Nothing leaves your device except direct peer connections.
-              </p>
-              <p>
-                <span className="text-gray-400 font-medium">Stack:</span> React + TypeScript + Vite + Tailwind CSS + PeerJS + Web Crypto API. Installable as a PWA.
-              </p>
+            <h3 className="text-sm font-semibold text-gray-200 mb-2">How does it work?</h3>
+            <p className="text-gray-400">
+              {APP_NAME} uses <span className="text-white font-medium">WebRTC</span> — the same technology behind video calls in your browser — to create direct connections between devices. A lightweight signaling server helps two devices find each other, but once connected, everything flows directly between them.
+            </p>
+            <p className="text-gray-400 mt-2">
+              Your identity is a cryptographic key pair (ECDSA P-256) generated on your device. Your contacts verify you by your unique fingerprint — a short code derived from your public key. Messages are encrypted with AES-256-GCM using shared keys negotiated via ECDH. Group chats use a shared group key distributed securely to each member.
+            </p>
+            <p className="text-gray-400 mt-2">
+              All your data — contacts, messages, keys, and files — is stored locally on your device. Nothing is uploaded to any server.
+            </p>
+          </section>
+
+          {/* Open source */}
+          <section className="border-t border-gray-800 pt-4">
+            <div className="flex gap-3">
+              <Code size={16} className="text-blue-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-gray-200 font-medium text-[13px]">Open source & self-hostable</p>
+                <p className="text-gray-500 text-[12px]">{APP_NAME} is fully open source. Anyone can run their own instance, customize it, or point it to their own signaling and STUN/TURN servers. No vendor lock-in, no trust required.</p>
+              </div>
             </div>
           </section>
 

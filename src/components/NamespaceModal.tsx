@@ -16,7 +16,7 @@ interface NamespaceModalProps {
   routerEndpoint?: string;  // e.g. "peerns-ns-teamchat-1"
   advanced?: boolean;       // advanced NS — no prefix
   onLeave?: () => void;     // shown for custom namespaces
-  joinStatus?: 'joining' | 'peer-slot' | null;
+  joinStatus?: 'electing' | 'joining' | 'peer-slot' | null;
   joinAttempt?: number;
 }
 
@@ -65,6 +65,7 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
                 isRouter ? 'text-yellow-400 border-yellow-800' : 'text-blue-400 border-blue-800'
               )}>
                 {joinStatus ? (
+                  joinStatus === 'electing' ? `Electing L${joinAttempt || 1}...` :
                   joinStatus === 'peer-slot' ? 'Reverse connect (-p1)' :
                   `Joining (attempt ${joinAttempt || 1}/3)`
                 ) : namespaceLevel === 0 ? 'Not joined' : role}
@@ -75,6 +76,9 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
               <div className="flex items-center gap-2 bg-gray-800/60 rounded-lg px-3 py-2">
                 <Loader2 size={12} className="text-blue-400 animate-spin" />
                 <span className="text-[11px] text-gray-300">
+                  {joinStatus === 'electing' && (
+                    <>Trying to claim router at level {joinAttempt || 1}...</>
+                  )}
                   {joinStatus === 'joining' && (
                     <>Connecting to router (attempt {joinAttempt || 1}/3, 8s timeout)...</>
                   )}
@@ -173,7 +177,7 @@ export function NamespaceModal({ role, ip, discID, namespaceLevel, isRouter, reg
           <div className="px-5 py-4 border-b border-gray-800">
             <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Join Sequence</div>
             <div className="text-[11px] text-gray-400 space-y-1 leading-relaxed">
-              <StepRow n={1} active={!isRouter && !joinStatus && namespaceLevel === 0} done={isRouter}>
+              <StepRow n={1} active={joinStatus === 'electing' || (!isRouter && !joinStatus && namespaceLevel === 0)} done={isRouter}>
                 Try to claim router slot (level 1)
               </StepRow>
               <StepRow n={2} active={joinStatus === 'joining'} done={!isRouter && namespaceLevel > 0 && !joinStatus}>
@@ -251,7 +255,7 @@ function StepRow({ n, active, done, children }: { n: number; active: boolean; do
   );
 }
 
-function RegistryRow({ entry, label }: { entry: PeerInfo; label?: string }) {
+const RegistryRow: React.FC<{ entry: PeerInfo; label?: string }> = ({ entry, label }) => {
   const isStale = !entry.isMe && (Date.now() - entry.lastSeen) > (TTL * 0.8);
   return (
     <div className={clsx('bg-gray-800 rounded-lg px-3 py-2', isStale && 'opacity-50')}>
@@ -276,4 +280,4 @@ function RegistryRow({ entry, label }: { entry: PeerInfo; label?: string }) {
       )}
     </div>
   );
-}
+};

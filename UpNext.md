@@ -1,104 +1,89 @@
-# 🚀 What's Next: Future Roadmap
+# PeerNS — Up Next
 
-The current architecture proves that serverless discovery is possible via Public IP. The next phase extends this logic to support **physical proximity**, **unbreakable group chats**, and **military-grade identity protection**.
+## Priority: Immediate (Build 19+)
 
-## 1. Geo-Spatial Discovery ("Stadium Mode")
-Currently, discovery is limited to users on the same WiFi (Public IP). By utilizing the browser's Geolocation API, we can create discovery namespaces based on physical location, allowing users on different networks (e.g., WiFi vs. 5G) to find each other when physically close.
+### 1. Group Chats & Group Video Conferencing
+Self-healing "floating" groups with multi-party video/audio/screen sharing for conference meetings. No server — the group infrastructure floats between participants.
 
-*   **Logic:** Convert GPS (Lat/Long) into a [Geohash](https://en.wikipedia.org/wiki/Geohash).
-*   **Precision:** 7 characters (~150m radius).
-*   **Router ID:** `myapp-geo-{geohash}-1`
-*   **Behavior:** The app attempts to claim the router for its current 150m square.
-*   **Edge Case Handling:** To solve the "border problem" (users standing on the edge of a zone), clients connect to the routers of their current zone *plus* the 8 surrounding neighbor zones.
-*   Or: have the client calculate the 4 surounding gps coordinates and hash them. Only enroll in the hashes that are foud in all 5 geolocation hashses (limits the network overhead).
-*   -------------------
-*  ```# (calculate)+hash            # (calculate)+hash```
-*  ```           #(GPS coordinate you are here)+hash    ```
-*  ```# (calculate)+hash            # (calculate)+hash```
-*   - enroll in all unique hashes. might only be 1 or 2...
-*   - namespace routers for geohash will include each users actual gps coordinate as a datapoint
-*   - client will look at all registrations from all geohash routers, and sort by closest gps coordinates from all hash groups
+- **Group = Topic Router.** Group ID: `peerns-group-{groupUUID}-1`
+- **Router election:** Creator becomes router. If they leave, remaining members claim the slot via jitter + election (same ns* protocol as namespaces).
+- **Star topology with relay:** Router relays messages and media streams between all participants.
+- **Group video/audio/screen:** Each participant opens MediaConnections to the router. Router forwards streams to all others (SFU-style via the elected router peer).
+- **Screen sharing in calls:** Any participant can share screen alongside camera. Multiple simultaneous streams supported.
+- **Host migration:** Router drops → members detect via `close` event → random jitter (0-3s) → first to claim `peerns-group-{uuid}-1` becomes new router → all others reconnect. Media streams re-established automatically.
+- **Group chat persistence:** Messages stored locally per group UUID. Each member has full history. New members receive backfill from router on join.
+- **UI:** Group list in sidebar, group creation modal, group video call view with participant grid, screen share overlay.
 
-## 2. Self-Healing "Floating" Groups
-Standard P2P groups rely on a specific "Host." If the host leaves, the group dies. We can solve this by applying our **Router Election Logic** to the group itself.
+### 2. Geo-Spatial Discovery ("Stadium Mode")
+Discovery by physical proximity — find people near you across different networks (WiFi vs 5G). Critical for conference/event use cases.
 
-*   **Concept:** A Group is not a list of peers; a Group is a *Topic Router*.
-*   **Group ID:** `myapp-group-{groupUUID}-1`
-*   **The Mechanism:**
-    1.  **Creation:** User A creates a group. They implicitly become the router for that Group ID.
-    2.  **Joining:** Users B and C connect to the Group ID. User A relays messages (Star Topology).
-    3.  **Host Migration (The Magic):** If User A leaves (or closes their laptop), the connection dies. Users B and C detect this, wait a random jitter (0–3s), and attempt to **claim the Group ID**.
-*   **Result:** As long as *one* member remains online, the group infrastructure persists. The "Server" floats from user to user automatically.
+- **Geohash routing:** 7-char geohash (~150m radius). Router ID: `peerns-geo-{geohash}-1`
+- **Border problem:** Calculate 4 surrounding coordinates + center, hash all 5, enroll in unique hashes (typically 1-2). Limits network overhead.
+- **Registry data:** Each peer's GPS coordinate included in checkin. Client sorts all peers from all geohash routers by distance.
+- **Conference mode:** Combine geo discovery with group creation — "Create a meeting room for everyone nearby."
+- **Privacy:** Geohash is coarse (~150m). Exact GPS only shared within the namespace registry, never stored permanently.
 
-## 3. "Stealth Mode" (Rotating Secure IDs)
-The current Persistent ID (`myapp-{uuid}`) is static. If a user shares it publicly, they can be spammed forever. To fix this, we introduce **Time-Based Identity Rotation** (similar to RSA tokens/TOTP).
+### 3. Public Key Re-Keying
+Contacts and chats currently keyed by PeerJS persistent ID. Re-key by **public key fingerprint** so identity survives PID changes.
 
-*   **The Mechanism:** `myapp-secure-{Hash(Secret + Time)}-1`
-*   **The Secret:** Generated automatically upon initial connection.
-*   **Confirmation (Bluetooth Style):** To ensure no Man-in-the-Middle attacks during the initial exchange, users can optionally compare a 6-digit "Safety Number" derived from the secret before trusting the connection.
-*   **Behavior:** The "Meeting Point" changes every 10 minutes. Even if an attacker intercepts the ID, it becomes dead within minutes. This completely separates "Discovery" from "Long-term Identity."
+- Storage keys: `contacts[fingerprint]`, `chats[fingerprint]`
+- Chat UI shows friendly name + public key hash, never PID
+- ContactModal shows current PeerJS PID as a routing detail only
+- Migration path: on first load, re-key existing contacts from PID to fingerprint
+- Detailed plan exists at `.claude/plans/validated-questing-grove.md`
 
-## 4. Application-Layer Encryption (E2EE)
-While WebRTC provides transport encryption (DTLS), we need to ensure that the person holding the ID is actually who they say they are.
+### 4. Trusted Contacts & Trust Levels
+Saved contacts become **trusted** by default. Trust is tied to the public key. Trust levels control capabilities.
 
-*   **Key Generation:** On first launch, the app generates a `CryptoKey` pair (ECDH-P521) via the Web Crypto API.
-*   **Trust on First Use (TOFU):**
-    1.  **Handshake:** When Peer A connects to Peer B via *Persistent ID*, they exchange **Public Keys**.
-    2.  **Storage:** The Public Key is stored locally alongside the contact's ID.
-*   **Verification:**
-    *   **Signing:** Every message sent is signed with the sender's *Private Key*.
-    *   **Verifying:** The receiver verifies the signature using the stored *Public Key*.
-    *   If the ID matches but the signature fails (e.g., a stolen router ID), the message is rejected.
+| Level | Label | Capabilities |
+|:------|:------|:-------------|
+| 0 | Blocked | No connections accepted |
+| 1 | Known | Messages + file transfer (current behavior) |
+| 2 | Trusted | + Calls, presence visibility, group invites, future RPC |
+| 3 | Full Access | + RPC command execution (see below) |
+
+- Default on save: Level 2 (Trusted)
+- UI: ContactModal shows trust badge + level selector
 
 ---
 
-## 🧩 The Final ID Hierarchy
+## Priority: Next Phase
 
-With these features, a single app instance manages four distinct layers of identity simultaneously.
+### 5. Remote API / RPC Framework
+Evolve the protocol from messaging to **Remote Procedure Calls** (JSON-RPC). Trusted contacts (Level 3) can send signed commands that execute in the browser without human intervention.
 
-### Group Routers (Discovery Namespaces)
-*These IDs are deterministic "meeting points." Any peer can claim them to become the router for that scope.*
+- **Protocol:**
+  - Request: `{ type: 'RPC', method: 'fs.list', params: { path: '/shared' }, id: '...', signature: '...' }`
+  - Response: `{ type: 'RPC_RES', id: '...', result: [...] }`
+  - Error: `{ type: 'RPC_RES', id: '...', error: { code: 403, message: 'Scope denied' } }`
+- **Security:** Signature verified against stored public key. Method checked against granted scopes.
+- **Scopes:** Path-based ACL syntax (`category:action:resource`)
 
-| Scope | ID Format | Purpose |
-| :--- | :--- | :--- |
-| **Network (WiFi)** | `myapp-{ip}-1` | Discovery for devices on the same Public IP. |
-| **Physical (Geo)** | `myapp-geo-{geohash}-1` | Discovery for devices in the same ~150m radius. |
-| **Topic (Group)** | `myapp-group-{groupUUID}-1` | Discovery for members of a specific chat group. |
+| Category | Scope Syntax | Example | Use Case |
+|:---------|:-------------|:--------|:---------|
+| **Filesystem** | `fs:{action}:{path}` | `fs:read:/public/photos/*` | Browse shared folder |
+| **Database** | `db:{action}:{key}` | `db:read:messages:timestamp>17000` | Sync new messages to another device |
+| **Media** | `media:{action}:{source}` | `media:stream:camera:environment` | Baby monitor / sentinel mode |
+| **System** | `sys:{action}` | `sys:status:battery` | Remote device health dashboard |
 
-### Peer Identities
-*These IDs represent a specific user/device.*
+- **"Self-Hosted" Mesh Cloud:** Desktop at home with `fs:write:/incoming/*` granted to Phone. Phone sends photo via RPC. Desktop stores in OPFS. Serverless encrypted backup.
 
-| Type | ID Format | Visibility | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Discovery ID** | `myapp-{namespace}-{discoveryUUID}` | **Public** | Opaque ID used to announce presence to a Router. `namespace` changes based on context (IP/Geo). |
-| **Persistent ID** | `myapp-{persistentUserUUID}` | **Private** | Long-term identity exchanged only after acceptance. Used for direct 1:1 connections. |
-| **Shared Secure ID**| `myapp-secure-{rotatingUserUUID}` | **Secret** | Rotating ID derived from `Hash(Secret + Time)`. Used for stealth/untraceable connections. |
-
-
+### 6. Signaling Resilience
+- Debounce `handleNetworkChange` on desktop
+- Cap total `new Peer()` calls per minute
+- Clear UI indicator for rate-limited vs genuinely offline
 
 ---
-## 5. Headless API & Remote Command Execution (RPC)
-We are evolving the protocol from simple "Messaging" to "Remote Procedure Calls" (JSON-RPC), allowing trusted devices to act as headless nodes or personal servers.
 
-*   **The Concept:** Trusted peers can send signed commands to query data, manage files, or trigger actions without human intervention on the receiving side.
-*   **Security:** This utilizes a granular **Access Control List (ACL)** based on cryptographic signatures. A user explicitly grants specific capabilities (Scopes) to a contact's Shared Secure ID.
-*   **Protocol:**
-    *   **Request:** `{ type: 'RPC', method: 'fs.list', params: { path: '/shared' }, signature: '...' }`
-    *   **Response:** `{ type: 'RPC_RES', result: ['photo.jpg', 'doc.pdf'] }`
+## Completed (Build 18)
 
-### Granular Permission Scopes
-Permissions are not binary; they utilize a path-based syntax (`category:action:resource`) to ensure a remote peer only accesses exactly what they are authorized to touch.
-
-| Category | Scope Syntax | Granularity Example | Use Case |
-| :--- | :--- | :--- | :--- |
-| **Filesystem** | `fs:{action}:{path}` | `fs:read:/public/photos/*` | Allow a peer to view the "Photos" folder, but **deny** access to `/documents` or root. |
-| **Database** | `db:{action}:{key}` | `db:read:messages:timestamp>17000` | Allow a syncing device (e.g., your phone) to fetch only **new** messages from your Desktop history. |
-| **Media** | `media:{action}:{source}` | `media:stream:camera:environment` | Allow a trusted "Sentinel" device to auto-start the **rear camera** only (baby monitor mode), preventing access to the front camera or microphone. |
-| **System** | `sys:{action}` | `sys:status:battery` | Allow a remote dashboard to monitor device health or storage quotas. |
-
-### "Self-Hosted" Mesh Cloud
-By combining **Granular Scopes** with **Trusted Shared Secure IDs**, users can safely treat their own devices as a personal cloud:
-1.  **Desktop** stays open at home with `fs:write:/incoming/*` scope granted to **Phone**.
-2.  **Phone** sends a photo via RPC to the Desktop's storage.
-3.  **Desktop** acknowledges receipt and indexes the file in OPFS (Origin Private File System).
-4.  **Result:** Serverless, encrypted file backup without user interaction on the receiving end.
+- Stale DataConnection fix (handleNetworkChange invalidates all conns)
+- Message retry on reconnect (failed + unacked messages)
+- Contact dedup by public key (migrateContact merges chats)
+- File delete in chat UI
+- Call logs in chat history (audio/video/screen, duration, missed/cancelled)
+- nsTryJoin 8s timeout (fixes -p1 peer slot fallback)
+- Namespace modal with join status + sequence steps
+- Reconnect dedup (prevents 429 rate limit storms)
+- ServiceWorker notifications for mobile PWA
+- Learn More / Version buttons moved to sidebar footer

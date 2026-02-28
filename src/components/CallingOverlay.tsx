@@ -4,6 +4,7 @@ import { PhoneOff, Monitor, Video, Mic } from 'lucide-react';
 interface CallingOverlayProps {
   fname: string;
   kind: 'audio' | 'video' | 'screen';
+  peerUnreachable?: boolean;
   onCancel: () => void;
 }
 
@@ -14,7 +15,7 @@ const KindIcon = ({ kind }: { kind: string }) => {
   return <Mic size={28} className="text-blue-400" />;
 };
 
-export function CallingOverlay({ fname, kind, onCancel }: CallingOverlayProps) {
+export function CallingOverlay({ fname, kind, peerUnreachable, onCancel }: CallingOverlayProps) {
   const [dots, setDots] = useState('');
 
   useEffect(() => {
@@ -31,6 +32,9 @@ export function CallingOverlay({ fname, kind, onCancel }: CallingOverlayProps) {
         <div className="text-center">
           <div className="text-white text-xl font-bold">{fname}</div>
           <div className="text-gray-400 text-sm mt-1">{kindLabel[kind]}{dots}</div>
+          {peerUnreachable && (
+            <div className="text-orange-400 text-xs mt-2">Peer may not have received the call</div>
+          )}
         </div>
       </div>
 

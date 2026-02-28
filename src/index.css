@@ -37,3 +37,25 @@
 .anim-slide-up     { animation: slide-up 150ms ease-out both; }
 .anim-slide-right  { animation: slide-in-right 120ms ease-out both; }
 .anim-fade-fast    { animation: fade-in-fast 100ms ease-out both; }
+
+/* Resizable sidebar — desktop only */
+@media (min-width: 768px) {
+  .sidebar-resizable {
+    width: var(--sidebar-w, 20rem) !important;
+  }
+}
+
+/* Nearby map name labels */
+.nearby-label {
+  background: rgba(17, 24, 39, 0.85);
+  border: 1px solid #374151;
+  color: #e5e7eb;
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 4px;
+  border-radius: 3px;
+  box-shadow: none;
+}
+.nearby-label::before {
+  border-top-color: #374151;
+}

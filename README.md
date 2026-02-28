@@ -1,210 +1,157 @@
+# PeerNS
 
-perwitwi# Serverless P2P Mesh Chat
+> Private, encrypted peer-to-peer messaging — no accounts, no servers.
 
-A proof-of-concept Serverless P2P application that utilizes WebRTC for transport and self-organizing "routers" within the browser to facilitate local network discovery without a dedicated backend.
+PeerNS is a serverless P2P messaging PWA that connects users directly via WebRTC. Messages, calls, and files are end-to-end encrypted and never touch a server. The app runs entirely in the browser — deploy it to any static host and it just works.
 
-## 💡 Core Concept & Novelty
+## Quick Start
 
-This project demonstrates a zero-infrastructure deployment model. It replaces what would conventionally require a hosted signaling server, a discovery service, and a presence registry with an application-level mesh that emerges from two stateless, public services.
+**Prerequisites:** Node.js 18+
 
-1.  **STUN as Namespace Discovery:** Google's STUN server (`stun.l.google.com`) is used not just for NAT traversal, but to extract the client's Public IP via `srflx` ICE candidates. This IP becomes the shared namespace key (`myapp-{ip}-...`) for "local" discovery.
-2.  **Protocol-Based Leader Election:** The PeerJS "ID Taken" error—normally a failure condition—is repurposed as a protocol primitive for router election. If `myapp-{ip}-1` is taken, the client joins as a peer; if free, it becomes the router.
-
-## 🏗 Architecture
-
-### Transport & Signaling
-*   **Transport:** WebRTC via [PeerJS](https://peerjs.com).
-*   **Signaling:** Public PeerJS server (`0.peerjs.com`).
-*   **Deployment:** Static PWA (HTML/JS/CSS only), zero backend logic.
-
-### IP Detection Strategy
-To group peers on the same network, the app needs the Public IP.
-1.  **Primary (WebRTC STUN):** Queries `stun.l.google.com:19302`. The returned `srflx` candidate contains the device's real public IP. This works on most networks (unless UDP 19302 is blocked).
-2.  **Fallback (HTTP):** If STUN fails (e.g., corporate proxies), the app falls back to `api.ipify.org`.
-3.  **Cellular:** On cellular connections, discovery is disabled due to NAT volatility. The app defaults to "Persistent ID" mode only.
-
----
-
-## 🆔 Identity System
-
-The app distinguishes between *finding* a peer and *trusting* a peer.
-
-| ID Type | Format | Visibility | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Router ID** | `myapp-{ip}-1` | Public | Deterministic anchor for the network mesh. |
-| **Discovery ID** | `myapp-{ip}-{discoveryUUID}` | Public | Broadcast to the router. Opaque (no name included). |
-| **Persistent ID** | `myapp-{persistentUUID}` | Private | Long-term identity. Only exchanged *after* connection acceptance. |
-
-### The "Duplicate Peer" Fix
-To prevent a saved contact from appearing as a stranger in the discovery list:
-1.  **discoveryUUID** is generated once on first launch and stored locally.
-2.  The Discovery ID (`myapp-{ip}-{discoveryUUID}`) is anonymous.
-3.  When a peer checks in with the Router, they send their `friendlyName` and `discoveryUUID` as data payload.
-4.  **Merging Logic:** The client parses the incoming registry. It extracts the `UUID` suffix from the Discovery ID and checks it against `localStorage` contacts.
-    *   **Match Found:** The peer is marked as `onNetwork: true` in the **Saved Contacts** list.
-    *   **No Match:** The peer appears in the **New Peers** list.
-
----
-
-## ⚡ Router Logic (Self-Organizing)
-
-The "Router" is simply a browser tab that won the race to claim the deterministic ID `myapp-{ip}-1`.
-
-### Election Process (DHCP-style)
-1.  **Attempt to register** `myapp-{ip}-1`.
-2.  **Success:** You are the Router. Initialize empty registry.
-3.  **Fail (ID Taken):** Connect to `myapp-{ip}-1` as a standard peer.
-
-### Router Responsibilities
-*   **Maintain Registry:** Stores `{ discoveryID, friendlyname, lastSeen, discoveryUUID }`.
-*   **Check-in:** On new peer connection, add to registry and **push full registry** to all connected peers.
-*   **Heartbeat:** Pings all peers every 60s. Removes non-responders and pushes updated registry.
-
-### Failover & Resilience
-*   **Local Cache:** All peers maintain a full copy of the registry.
-*   **TTL:** Cache entries have a 90s TTL.
-*   **Re-Election:** If the router goes offline (ping fails):
-    1.  Peers wait a random **jitter delay** (0–3s).
-    2.  Peers attempt to claim `myapp-{ip}-1`.
-    3.  **Winner:** Becomes new router, imports its *local cache* as the new source of truth, and requests re-checkins.
-    4.  **Losers:** Re-connect to the new router.
-
----
-
-## 📡 Connection Flow
-
-### 1. Discovery (On Network)
-Peers automatically discover each other via the Router registry push.
-
-### 2. Handshake (Peer-to-Peer)
-A connection request is made to a **Discovery ID**.
-*   **Peer A** sends: `{ type: 'request', friendlyname: 'John' }`
-*   **Peer B** prompts user (Accept/Reject).
-*   **On Accept:**
-    *   **Peer B** sends: `{ type: 'accepted', persistentID: 'myapp-uuid-B', discoveryUUID: '...' }`
-    *   **Peer A** responds: `{ type: 'confirm', persistentID: 'myapp-uuid-A', discoveryUUID: '...' }`
-*   *Result:* Both peers store each other's **Persistent ID** and **Discovery UUID**. All future communication occurs via Persistent ID.
-
-### 3. Saved Contacts (Offline/Remote)
-If a known peer is not on the local network (Router registry):
-*   They appear under **Saved Contacts**.
-*   User can click **Ping**.
-*   App attempts a direct WebRTC connection to their stored `Persistent ID`.
-
----
-
-## 💻 UI Structure
-
-The peer list is strictly divided to handle the visibility logic:
-
-**🌐 ON THIS NETWORK**
-> Contains both known contacts (merged via UUID match) and unknown strangers.
-*   💬 **John** `[● on network]` `[Open Chat]`
-*   👤 **Unknown** `[Connect]`
-
-**💾 SAVED CONTACTS**
-> Contacts stored in localStorage but not currently in the local registry.
-*   💬 **Mike** `[○ offline]` `[Ping]`
-*   💬 **Sarah** `[○ offline]` `[Ping]`
-
----
-
-## 🛠 Message Protocol
-
-**Peer → Router**
-```javascript
-{ type: 'checkin', discoveryID: '...', friendlyname: '...' }
-{ type: 'ping' } // Keepalive
+```bash
+git clone https://github.com/smileytechness/peerns.git
+cd peerns
+npm install
+npm run dev       # Dev server on http://localhost:3000
+npm run build     # Production build → dist/
 ```
-=======================================================================================================================
-=======================================================================================================================
-NEW IDEADS:
 
-# 🚀 Protocol Roadmap: Zero-Trust & Resilience
+Deploy the `dist/` folder to any static host: Vercel, Netlify, GitHub Pages, Cloudflare Pages, or your own server.
 
-This document outlines the architectural evolution from simple P2P ID sharing to a robust, cryptographic Zero-Trust model with self-healing connectivity.
+## Configuration
 
----
+### Signaling Server
 
-## 1. Zero-Trust Cryptographic Identity
+By default, PeerNS uses the free public PeerJS server at `0.peerjs.com`.
 
-We are fundamentally changing the security model. We no longer rely on PeerJS IDs for persistence or trust. Instead, we adopt a system where **Transport is Ephemeral** and **Identity is Cryptographic**.
+To use a different signaling server, edit `src/lib/p2p-signaling.ts` line 22:
 
-*   **The Principle:** A PeerJS ID is just a temporary "IP address." A user's ECDSA Key Pair is their permanent "Passport."
+```ts
+// Default:
+mgr.persPeer = new Peer(mgr.persistentID);
 
-### Identity Verification Handshake
-Trust is established strictly through cryptographic proof, not ID ownership.
-1.  **Challenge:** When Alice connects to Bob (regardless of which PeerJS ID she uses), she sends her **Public Key** and a **Digital Signature** of that key.
-2.  **Verification:** Bob verifies the signature. This mathematically proves the sender possesses the Private Key associated with that identity.
-3.  **Result:** If valid, Bob updates his local contact list: *"The identity [AlicePubKey] is currently located at Transport ID [myapp-random-123]."*
+// Custom server:
+mgr.persPeer = new Peer(mgr.persistentID, {
+  host: 'your-server.com',
+  port: 443,
+  path: '/peerjs',
+  secure: true,
+});
+```
 
-### The New ID Schema
-The concept of a "Persistent PeerJS ID" is deprecated.
+To self-host a PeerJS server: [github.com/peers/peerjs-server](https://github.com/peers/peerjs-server)
 
-| Type | Format | Visibility | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Transport ID** | `myapp-{randomUUID}` | **Public** | An ephemeral, session-specific routing address. Semi-persistent; only changes if fails to re-register on peerjs. **No trust value.** |
-| **Discovery ID** | `myapp-{namespace}-{randomUUID}`| **Public** | A temporary address used to announce presence to a *local* discovery router (IP/Geo), and inform it of its current transport id. |
-| **Identity** | `<base64-PublicKey>` | **Private** | The user's permanent identity. Exchanged via Transport IDs after a trusted handshake. |
+### STUN / TURN Servers
 
----
+Default STUN servers are configured in `src/lib/discovery.ts` lines 18–21:
 
-## 2. Time-Based Algorithmic Rendezvous (TOTP)
+```ts
+iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
+]
+```
 
-This feature is an **opt-in backup mechanism** for "Special Contacts." It allows trusted peers to find each other even if their Transport IDs are lost, squatted, or changed, without requiring a central server.
+To add TURN servers (required for symmetric NAT / restrictive firewalls), add entries to the `iceServers` array and pass the config when creating peers:
 
-*   **The Concept:** Two peers generate a **Shared Secret** during their initial connection. This secret is used to calculate a predictable, rotating **Rendezvous Namespace** based on the current time.
-*   **Mesh Router Integration:** Crucially, this calculated string functions exactly like a **Discovery Namespace**.
-    *   Peers do not just "connect" to the ID.
-    *   They utilize the app's existing **Router Election Logic** within this private namespace (e.g., claiming `{RendezvousHash}-1`).
-    *   This ensures that even if both peers come online simultaneously (use jitter 1-3s to avoid crashes), one becomes the Router and the other acts as the Peer, guaranteeing a successful meeting.
+```ts
+new Peer(id, {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:your-turn.com:3478', username: 'user', credential: 'pass' },
+    ]
+  }
+});
+```
 
-### The Mechanism
-1.  **Shared Secret:** A 256-bit secret exchanged once during setup.
-2.  **Universal Time Slots:** Fixed 10-minute UTC intervals (e.g., `xx:00`, `xx:10`, `xx:20`).
-3.  **Namespace Generation:**
-    ```javascript
-    const timeSlot = 'UTC-YYYY-MM-DD-HH-' + Math.floor(minutes / 10);
-    const rendezvousHash = HMAC_SHA256(SharedSecret, timeSlot);
-    const namespace = `rendezvous-${rendezvousHash}`;
-    // Router ID becomes: myapp-{namespace}-1
-    ```
+### IP Detection Endpoints
 
-### The Connection State Machine
-Clients maintain a strict state for each Special Contact.
+Public IP is used for same-network discovery. Detection methods:
 
-#### State 1: Connected (Primary)
-*   **Rule:** The client communicates directly via the contact's last known **Transport ID**. The rendezvous system is idle.
+1. **Primary:** STUN `srflx` candidate (lines 18–21 in `src/lib/discovery.ts`)
+2. **Fallback:** HTTP APIs at `src/lib/discovery.ts` lines 75–76:
+   ```ts
+   'https://api.ipify.org?format=json'
+   'https://api4.my-ip.io/ip.json'
+   ```
 
-#### State 2: Reconnecting (Offline/Lost)
-*   **Trigger:** Direct connection to the Transport ID fails.
-*   **Action:** The client calculates the current **Rendezvous Namespace** and attempts to join it (either as Router or Peer).
-*   **Goal:** Find the contact in this private mesh, exchange new Transport IDs, and return to State 1.
+Replace these with your own IP echo service if needed.
 
-#### State 3: Recovering (Squatted)
-*   **Trigger:** The contact's Transport ID returns a valid PeerJS connection but fails the **Cryptographic Identity** check (Imposter/Squatter).
-*   **Action:** The Transport ID is blacklisted. The client immediately forces a switch to the **Rendezvous Namespace** to re-establish a secure link.
+## Features
 
-#### State 4: Proactive Update
-*   **Trigger:** The client's own Transport ID changes.
-*   **Action:** It immediately announces the new Transport ID to all online contacts. For offline contacts, it joins the current Rendezvous Namespace to "leave a note" with its new address.
+- **End-to-end encrypted** messages, calls, and files (AES-256-GCM + ECDH)
+- **Cross-device file sharing** between Android, iPhone, and desktop — any network, no login
+- **Same-network auto-discovery** via public IP namespace
+- **GPS nearby discovery** using geohash-based proximity (opt-in)
+- **Custom namespaces** — join by name, cross-network discovery
+- **Encrypted group chats** with shared group keys and key rotation
+- **1:1 and group calls** — voice, video, and screen share
+- **Instant reconnect** via namespace routing and rendezvous
+- **Installable PWA** with offline support and push notifications
 
-#### Housekeeping
-*   **Rule:** If a Special Contact is unseen for >30 days, the app prompts the user to pause the rendezvous contract to save background resources.
+## Architecture Overview
 
----
+| Layer | Technology |
+|-------|-----------|
+| Transport | WebRTC via PeerJS |
+| Signaling | PeerJS server (handshake only — no message relay) |
+| Identity | ECDSA P-256 key pairs (Web Crypto API) |
+| Encryption | AES-256-GCM (1:1 via ECDH, groups via shared key) |
+| Storage | localStorage + IndexedDB (all local) |
+| UI | React 19 + TypeScript + Tailwind CSS 4 + Vite |
 
-## 3. Origin-Signed Namespace (Spam Mitigation)
+### How discovery works
 
-This feature replaces the static `myapp` root prefix with a dynamic, server-verified token.
+1. The app detects your public IP via STUN (or HTTP fallback)
+2. Your IP becomes a namespace — e.g. `peerns-203-0-113-1`
+3. One browser tab claims the router ID (`...-1`) via PeerJS "ID Taken" election
+4. The router maintains a registry of all peers on that namespace
+5. Peers check in, receive the full registry, and can connect to each other
+6. If the router goes offline, a new one is elected automatically (jittered race)
 
-*   **The Concept:** The application derives its root namespace variable from a cryptographic signature provided by the origin web server headers (`X-Mesh-Beacon`).
-*   **The Goal:** Mitigation, not perfection. It raises the barrier to entry for spammers, unauthorized bot clones, and generic PeerJS scanners.
+Custom namespaces and GPS nearby work the same way — different namespace, same routing protocol.
 
-### How it works
-1.  **The Beacon:** The web server signs the current timestamp with a private key and attaches it to response headers.
-2.  **The Check:** The server only provides this header if the request `Origin` matches the official domain (CORS).
-3.  **The Namespace:** The client uses this signature as the root prefix (e.g., `sig8a2b-{ip}-1` instead of `myapp-{ip}-1`).
+### How encryption works
 
-### Limitation
-*   **Not a DRM Solution:** A determined attacker can manually extract the token and share it, or build a proxy to leak it. However, because the token rotates periodically (e.g., every 10 minutes), an attacker must maintain active infrastructure to bypass it, preventing low-effort scripts and "saved-to-disk" local copies from flooding the public mesh.
+1. Each device generates an ECDSA P-256 key pair on first launch
+2. Contacts are identified by their public key fingerprint (SHA-256, 16-char hex)
+3. When two peers connect, they perform ECDH to derive a shared AES-256-GCM key
+4. All messages, calls, and files are encrypted with this shared key
+5. Group chats use a shared AES-256-GCM group key, distributed pairwise-encrypted to each member via ECDH
+6. Key rotation occurs on member leave/kick
+
+## Project Structure
+
+| File | Description |
+|------|-------------|
+| `src/lib/p2p.ts` | Main P2PManager class — fields, init, keys, public API |
+| `src/lib/p2p-signaling.ts` | PeerJS signaling connection and reconnect |
+| `src/lib/p2p-ns.ts` | Namespace routing (18 methods) |
+| `src/lib/p2p-messaging.ts` | Message handling and queue |
+| `src/lib/p2p-handshake.ts` | Connection handshake protocol |
+| `src/lib/p2p-group.ts` | Group chat + group calls (25+ methods) |
+| `src/lib/p2p-geo.ts` | GPS nearby discovery (geohash) |
+| `src/lib/p2p-rvz.ts` | Rendezvous reconnect (HMAC time slots) |
+| `src/lib/crypto.ts` | All cryptography (ECDSA, ECDH, AES-GCM, group keys) |
+| `src/lib/discovery.ts` | IP detection, STUN, ID factories |
+| `src/lib/store.ts` | Persistence (localStorage + IndexedDB) |
+| `src/lib/types.ts` | Type definitions and constants |
+| `src/lib/geohash.ts` | Geohash encode/decode/neighbors/distance |
+| `src/hooks/useP2P.ts` | React hook for P2PManager |
+| `src/components/` | React UI components |
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Dev server on port 3000 |
+| `npm run build` | Production build to `dist/` |
+| `npm run preview` | Preview production build |
+| `npm run lint` | TypeScript type check |
+| `npm run clean` | Remove `dist/` |
+
+## License
+
+[GitHub](https://github.com/smileytechness/peerns) · Created by [ITQIX Technology](https://itqix.com)

@@ -12,32 +12,17 @@ export default defineConfig(() => {
       tailwindcss(),
       basicSsl(),
       VitePWA({
+        strategies: 'injectManifest',
+        srcDir: 'src',
+        filename: 'sw.ts',
         registerType: 'autoUpdate',
         devOptions: { enabled: true },
-        workbox: {
+        injectManifest: {
           globPatterns: ['**/*.{js,css,html,png,svg,ico,webmanifest}'],
-          navigateFallback: 'index.html',
-          // Take control of pages immediately on update — phone gets new code
-          // as soon as it reconnects to WiFi and the SW detects an update.
-          clientsClaim: true,
-          skipWaiting: true,
-          runtimeCaching: [
-            {
-              // Never cache PeerJS signaling — always needs live network
-              urlPattern: /^https:\/\/0\.peerjs\.com\/.*/i,
-              handler: 'NetworkOnly',
-            },
-            {
-              // Cache STUN/IP detection calls network-first, fall back to cache
-              urlPattern: /^https:\/\/api\.ipify\.org\/.*/i,
-              handler: 'NetworkFirst',
-              options: { cacheName: 'ip-detection', networkTimeoutSeconds: 3 },
-            },
-          ],
         },
         manifest: {
-          name: 'myapp P2P',
-          short_name: 'myapp',
+          name: 'PeerNS',
+          short_name: 'PeerNS',
           description: 'Serverless peer-to-peer messenger',
           theme_color: '#0d1117',
           background_color: '#0d1117',

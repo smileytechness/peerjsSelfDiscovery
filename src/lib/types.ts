@@ -21,16 +21,20 @@ export interface PeerInfo {
 
 export interface Contact {
   friendlyName: string;
+  fingerprint?: string;              // Primary key (16-char hex SHA-256 of publicKey)
+  publicKey?: string;
+  currentPID: string;                // Last known PeerJS ID for connectivity
+  knownPIDs?: string[];              // All historical PIDs this contact has used
   discoveryID: string | null;
   discoveryUUID: string;
-  conn?: any;
-  onNetwork?: boolean;
-  networkDiscID?: string | null;
-  publicKey?: string;            // For Zero Trust
-  lastSeen?: number;             // Timestamp of last interaction
-  pending?: 'outgoing' | 'incoming'; // outgoing = we sent request; incoming = they sent, we saved
-  pendingFingerprint?: string;   // key fingerprint from their request
-  pendingVerified?: boolean;     // signature verified at request time
+  sharedKeyFingerprint?: string;     // Persisted to avoid recomputation on reconnect
+  conn?: any;                        // runtime only, not persisted
+  onNetwork?: boolean;               // runtime only
+  networkDiscID?: string | null;     // runtime only
+  lastSeen?: number;
+  pending?: 'outgoing' | 'incoming';
+  pendingFingerprint?: string;
+  pendingVerified?: boolean;
 }
 
 export interface NSConfig {
@@ -48,7 +52,7 @@ export interface CustomNS {
   offline: boolean;
   advanced?: boolean;
   registry: Record<string, PeerInfo>;
-  joinStatus?: 'joining' | 'peer-slot' | null;
+  joinStatus?: 'electing' | 'joining' | 'peer-slot' | null;
   joinAttempt?: number;
 }
 
@@ -78,4 +82,71 @@ export interface FileTransfer {
   total: number;
   chunks: ArrayBuffer[];
   received: number;
+}
+
+// ─── Group Chat Types ────────────────────────────────────────────────────────
+
+export interface GroupMember {
+  fingerprint: string;
+  friendlyName: string;
+  publicKey?: string;
+  currentPID?: string;
+  joinedAt: number;
+  role: 'admin' | 'member';
+}
+
+export interface GroupInfo {
+  id: string;                                    // groupUUID
+  name: string;
+  createdBy: string;                             // fingerprint of creator
+  createdAt: number;
+  members: Record<string, GroupMember>;           // keyed by fingerprint
+  inviteSlug?: string;                           // optional join slug
+  groupKeyBase64?: string;                       // persisted AES-256-GCM group key
+}
+
+export interface GroupMessage {
+  id: string;
+  groupId: string;
+  senderFP: string;
+  senderName: string;
+  content: string;
+  ts: number;
+  type: 'text' | 'file' | 'system';
+  name?: string;
+  tid?: string;
+  size?: number;
+  deliveredTo?: string[];
+  status?: 'sending' | 'sent' | 'failed';
+  edited?: boolean;
+  deleted?: boolean;
+  e2e?: boolean;
+  iv?: string;
+  ct?: string;
+}
+
+// ─── Group Call Types ────────────────────────────────────────────────────────
+
+export interface GroupCallParticipant {
+  fingerprint: string;
+  friendlyName: string;
+  pid: string;
+  joinedAt: number;
+}
+
+export interface GroupCallInfo {
+  callId: string;
+  groupId: string;
+  kind: 'audio' | 'video' | 'screen';
+  startedBy: string;                                // fingerprint of initiator
+  startedAt: number;
+  participants: Record<string, GroupCallParticipant>; // keyed by fingerprint
+}
+
+// ─── Geo Discovery Types ─────────────────────────────────────────────────────
+
+export interface GeoRegistryEntry extends PeerInfo {
+  lat: number;
+  lng: number;
+  accuracy: number;
 }

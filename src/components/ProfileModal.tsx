@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Copy, Key, Check, Pencil } from 'lucide-react';
+import { X, Copy, Key, Check, Pencil, History } from 'lucide-react';
 import { clsx } from 'clsx';
 
 interface ProfileModalProps {
@@ -11,6 +11,7 @@ interface ProfileModalProps {
   lastSignalingTs: number;
   persConnected: boolean;
   signalingServer: string;
+  pidHistory: string[];
   onEditName: (name: string) => void;
   onClose: () => void;
 }
@@ -53,7 +54,7 @@ function InfoRow({ label, children }: { label: string; children: React.ReactNode
 
 export function ProfileModal({
   name, pid, publicKey, fingerprint, signalingState, lastSignalingTs, persConnected,
-  signalingServer, onEditName, onClose
+  signalingServer, pidHistory, onEditName, onClose
 }: ProfileModalProps) {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState(name);
@@ -137,6 +138,21 @@ export function ProfileModal({
               {pid && <CopyButton text={pid} />}
             </div>
           </InfoRow>
+
+          {/* PID History */}
+          {pidHistory.length > 0 && (
+            <InfoRow label={`Previous Addresses (${pidHistory.length})`}>
+              <div className="bg-gray-950 rounded-lg p-2 space-y-1 max-h-24 overflow-y-auto">
+                {pidHistory.map((oldPid) => (
+                  <div key={oldPid} className="flex items-center gap-1">
+                    <History size={10} className="text-gray-600 shrink-0" />
+                    <span className="font-mono text-[10px] text-gray-500 flex-1 truncate">{oldPid}</span>
+                    <CopyButton text={oldPid} />
+                  </div>
+                ))}
+              </div>
+            </InfoRow>
+          )}
 
           {/* Key fingerprint — the short 8-byte hash shown at a glance */}
           <InfoRow label="Key Fingerprint (SHA-256, first 8 bytes)">

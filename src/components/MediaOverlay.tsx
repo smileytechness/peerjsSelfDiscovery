@@ -8,29 +8,24 @@ interface MediaOverlayProps {
   cameraStream?: MediaStream;
   fname: string;
   kind: string;
+  duration: number;
+  call: any;
   onEnd: () => void;
   onMinimize?: () => void;
 }
 
-export function MediaOverlay({ stream, localStream, cameraStream, fname, kind, onEnd, onMinimize }: MediaOverlayProps) {
+export function MediaOverlay({ stream, localStream, cameraStream, fname, kind, duration, call, onEnd, onMinimize }: MediaOverlayProps) {
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const [micMuted, setMicMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
-  const [duration, setDuration] = useState(0);
 
   useEffect(() => {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
     if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
     if (cameraVideoRef.current && cameraStream) cameraVideoRef.current.srcObject = cameraStream;
   }, [stream, localStream, cameraStream]);
-
-  // Call duration timer
-  useEffect(() => {
-    const t = setInterval(() => setDuration(d => d + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   const formatDuration = (s: number) => {
     const m = Math.floor(s / 60);
@@ -71,6 +66,16 @@ export function MediaOverlay({ stream, localStream, cameraStream, fname, kind, o
         vidTrack.stop();
       }
       if (localVideoRef.current) localVideoRef.current.srcObject = localStream!;
+      // Update the WebRTC sender so the remote peer sees the new camera
+      try {
+        const pc = call?.peerConnection;
+        if (pc) {
+          const sender = pc.getSenders().find((s: RTCRtpSender) => s.track?.kind === 'video');
+          if (sender) await sender.replaceTrack(newTrack);
+        }
+      } catch (e) {
+        console.error('Failed to replace track on WebRTC sender:', e);
+      }
     } catch {}
   };
 

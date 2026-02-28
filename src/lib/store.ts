@@ -1,4 +1,4 @@
-import { Contact, ChatMessage, APP_PREFIX } from './types';
+import { Contact, ChatMessage, GroupInfo, GroupMessage, APP_PREFIX } from './types';
 
 const IDB_NAME = `${APP_PREFIX}-files`;
 const IDB_STORE = 'files';
@@ -6,13 +6,21 @@ const IDB_STORE = 'files';
 export function saveContacts(contacts: Record<string, Contact>) {
   try {
     const clean: Record<string, any> = {};
-    Object.keys(contacts).forEach((pid) => {
-      clean[pid] = {
-        friendlyName: contacts[pid].friendlyName,
-        discoveryID: contacts[pid].discoveryID,
-        discoveryUUID: contacts[pid].discoveryUUID,
-        publicKey: contacts[pid].publicKey,
-        lastSeen: contacts[pid].lastSeen,
+    Object.keys(contacts).forEach((key) => {
+      const c = contacts[key];
+      clean[key] = {
+        friendlyName: c.friendlyName,
+        fingerprint: c.fingerprint,
+        publicKey: c.publicKey,
+        currentPID: c.currentPID,
+        knownPIDs: c.knownPIDs,
+        discoveryID: c.discoveryID,
+        discoveryUUID: c.discoveryUUID,
+        sharedKeyFingerprint: c.sharedKeyFingerprint,
+        lastSeen: c.lastSeen,
+        pending: c.pending,
+        pendingFingerprint: c.pendingFingerprint,
+        pendingVerified: c.pendingVerified,
       };
     });
     localStorage.setItem(`${APP_PREFIX}-contacts`, JSON.stringify(clean));
@@ -128,5 +136,41 @@ export async function loadFile(tid: string): Promise<string | null> {
     });
   } catch (e) {
     return null;
+  }
+}
+
+// ─── Group Persistence ───────────────────────────────────────────────────────
+
+export function saveGroups(groups: GroupInfo[]) {
+  try {
+    localStorage.setItem(`${APP_PREFIX}-groups`, JSON.stringify(groups));
+  } catch (e) {
+    console.error('Group save error:', e);
+  }
+}
+
+export function loadGroups(): GroupInfo[] {
+  try {
+    const g = localStorage.getItem(`${APP_PREFIX}-groups`);
+    return g ? JSON.parse(g) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveGroupMessages(groupId: string, messages: GroupMessage[]) {
+  try {
+    localStorage.setItem(`${APP_PREFIX}-group-msgs-${groupId}`, JSON.stringify(messages));
+  } catch (e) {
+    console.error('Group messages save error:', e);
+  }
+}
+
+export function loadGroupMessages(groupId: string): GroupMessage[] {
+  try {
+    const m = localStorage.getItem(`${APP_PREFIX}-group-msgs-${groupId}`);
+    return m ? JSON.parse(m) : [];
+  } catch {
+    return [];
   }
 }

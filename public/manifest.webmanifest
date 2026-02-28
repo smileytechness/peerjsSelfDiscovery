@@ -1,7 +1,7 @@
 {
-  "name": "PeerNS",
+  "name": "PeerNS — Private P2P Messaging",
   "short_name": "PeerNS",
-  "description": "Serverless peer-to-peer messenger",
+  "description": "Private, encrypted peer-to-peer messaging, calls, and group chats. No accounts, no servers — connect directly with anyone on any network.",
   "theme_color": "#0d1117",
   "background_color": "#0d1117",
   "display": "standalone",
