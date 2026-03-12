@@ -166,6 +166,12 @@ Additionally, no timestamp freshness check exists in the current code — `handl
 
 **Verdict:** Namespace traffic is intentionally public. Adding identity verification here would be defending the lobby when the real security gate is the hello handshake at the persistent connection layer. Any spoofed namespace entry still has to pass the ECDH challenge hello to establish a usable session. Accepted design tradeoff.
 
+> **Feature Note — Trusted Namespaces (Conceptual)**
+>
+> A password-protected namespace variant could allow automatic mutual contact establishment for all verified members, bypassing the manual per-contact persistent connection setup while reusing the existing ECDH challenge infrastructure. Would be vulnerable to offline password hashing.
+>
+> **Out of scope for this audit.** Recorded here as a design direction.
+
 ### 4.8 Rendezvous (p2p-rvz.ts)
 
 | Protection Layer | Status | Notes |
@@ -512,7 +518,56 @@ The group AES layer serves the same role for group channels. Without it, any pee
 
 ---
 
-## 9. Architectural Note — The Full-Circle Conclusion
+## 9. PeerNS vs. Signal vs. iMessage — Security Posture Comparison
+
+### 9.1 Structural Note on Server Custody
+
+PeerNS uses PeerJS only for WebRTC signaling (SDP exchange). Once connected, all traffic travels directly peer-to-peer over DTLS DataChannels — PeerJS never has custody of message content at any point, even transiently. Signal and iMessage both route messages through their respective servers, holding encrypted payloads until the recipient comes online.
+
+**Why X3DH is not relevant to PeerNS:** X3DH (Extended Triple Diffie-Hellman) exists to establish a shared secret with an *offline* peer by fetching prekeys from a server. PeerNS requires both peers to be reachable for a WebRTC connection — messages queue on-device and transmit when the peer reconnects over a fresh DTLS session. There is no offline prekey server to design around. X3DH solves a structural problem PeerNS does not have.
+
+### 9.2 1:1 In-Transit Comparison
+
+| Property | PeerNS (post-remediation) | Signal | iMessage |
+|---|---|---|---|
+| Message relay | None — direct P2P DTLS | Signal servers (encrypted) | Apple servers (encrypted) |
+| Server sees message content | ❌ Never — no server custody | ❌ Never — E2E encrypted | ❌ Never — E2E encrypted† |
+| Server sees connection metadata | PeerJS sees connection graph; no message metadata | Signal sees sender/recipient/timing | Apple sees sender/recipient/timing |
+| Transport encryption | DTLS (enforced by WebRTC) | TLS to Signal servers | TLS to Apple servers |
+| Application-layer encryption | ECDH AES-256-GCM | Double Ratchet (AES-256) | AES-256 per recipient |
+| Per-session forward secrecy | ✅ DTLS ephemeral keys per session | ✅ Double Ratchet | ✅ Per-message keys |
+| Per-message forward secrecy | ❌ DTLS rotates per session, not per message | ✅ Every message | ✅ Every message |
+| Session identity verification | ECDH challenge per connection | X3DH + signed prekeys | Apple PKI |
+| Offline delivery | ❌ Queues on sender device | ✅ Server holds encrypted | ✅ Apple holds encrypted |
+| Protocol open source | ✅ Yes | ✅ Yes (AGPL-3.0 — no commercial license required) | ❌ Proprietary |
+
+† iCloud backup without Apple's Advanced Data Protection exposes stored message history to Apple.
+
+### 9.3 Group In-Transit Comparison
+
+| Property | PeerNS (post-remediation) | Signal (Sender Keys) | iMessage |
+|---|---|---|---|
+| Message relay | None — peer-elected namespace router; all hops are P2P DTLS | Signal servers | Apple servers |
+| Server message custody | None — structurally impossible | Encrypted blobs held until recipient online | Encrypted blobs held until recipient online |
+| Application-layer group encryption | AES-256-GCM group key, pairwise ECDH distributed | Sender Keys (per-sender ratchet) | Per-recipient AES via Apple PKI |
+| Forward secrecy | Per-session (DTLS) + group AES layer | Per-message (Sender Keys ratchet) | Per-message |
+| Offline delivery | ❌ No server to hold messages | ✅ Signal holds encrypted | ✅ Apple holds encrypted |
+| Infrastructure required | None beyond PeerJS signaling | Signal server infrastructure | Apple infrastructure |
+
+The group namespace router in PeerNS is not a server — it is a dynamically self-elected peer from whoever is online in the namespace, operating over the same DTLS + ECDH challenge stack as all other connections. No central node has custody of any message at any point.
+
+### 9.4 At-Rest Comparison
+
+At-rest compromise is broadly equivalent across all three platforms once device authentication is defeated. An attacker who bypasses biometric/PIN authentication obtains stored messages regardless of what the in-transit protocol provided. This is a device-layer problem, not a protocol-layer one, and should not be compared against in-transit properties.
+
+| Property | PeerNS (post-remediation) | Signal | iMessage |
+|---|---|---|---|
+| Message history encrypted at rest | ✅ WebAuthn PRF master key (proposed) | ✅ SQLCipher | ✅ iOS Data Protection |
+| Private key encrypted at rest | ✅ WebAuthn PRF master key (proposed) | ✅ Secure Enclave / keystore | ✅ Secure Enclave |
+| Blast radius if device auth defeated | All stored messages | All stored messages | All stored messages |
+| iCloud/backup exposure | N/A — no cloud sync in current design | ❌ Not backed up to cloud | ⚠️ Exposed without Advanced Data Protection |
+
+## 10. Architectural Note — The Full-Circle Conclusion
 
 The original audit's Phase 5 recommendation to remove application-layer ECDH encryption was conceptually correct but built on a false premise. It claimed ECDSA+DTLS closed the identity gap, making ECDH redundant. It does not — as the hello proxy attack demonstrates. So removing ECDH at that stage would have introduced a serious vulnerability.
 
@@ -535,7 +590,46 @@ The journey of this analysis ends up near where the original audit wanted to go 
 
 ---
 
-## 10. Accepted Residual Risks (Post-Remediation)
+## 11. Note on Encryption Strength and Post-Quantum Vulnerability
+
+**Current primitives:** ECDSA P-521 for identity keys; AES-256-GCM for message content and at-rest master key encryption. P-521 provides approximately 260 bits of classical security — stronger than P-256 or Curve25519 used by Signal, though all are considered adequate today. AES-256 provides 256-bit classical security.
+
+**Classical brute force:** Not a practical threat for either primitive at current or foreseeable computational scales.
+
+**Quantum threat by primitive:**
+
+| Primitive | Algorithm at risk | Mechanism | Impact |
+|---|---|---|---|
+| AES-256-GCM | Grover's algorithm | Grover's provides a quadratic speedup over brute force key search — it finds a key in √(keyspace) operations rather than keyspace operations. Against AES-256 this halves the effective security level from 256 to ~128 bits. | Weakened but survives — 128-bit security remains NIST-approved |
+| DTLS 1.2/1.3 handshake (ECDHE) | Shor's algorithm | DTLS negotiates a session key via ECDHE: both sides generate ephemeral EC keypairs, exchange public keys over the wire, and derive the same shared secret via scalar multiplication. Shor's solves the elliptic curve discrete logarithm in polynomial time — a quantum attacker observing the handshake applies it to either ephemeral public key to recover its private key, then derives the identical session secret. Every byte of the session is then decryptable. Enables **harvest-now-decrypt-later**: a passive attacker can record DTLS traffic today and decrypt it retroactively once a capable quantum computer exists. | **Complete break** of transport layer — all channels exposed |
+| ECDH challenge-response | Shor's algorithm | The challenge is encrypted to the peer's long-term EC public key. Shor's recovers the corresponding private key from the observed public key directly, allowing the attacker to decrypt any challenge and produce a valid response without possessing the actual private key. | **Complete break** of session identity verification |
+| ECDSA P-521 authorship signatures | Shor's algorithm | ECDSA security rests on the same elliptic curve discrete logarithm problem as ECDH. Shor's recovers the signing private key from the observed public key, enabling forgery of any per-message authorship signature. P-521, P-256, and Curve25519 are equally broken — curve size does not help against Shor's. | **Complete break** of message authorship |
+| RSA (not used here) | Shor's algorithm | Shor's also solves integer factorization, which RSA depends on. | Complete break — same reason |
+
+**What breaks and where:**
+
+*In-transit:*
+- **DTLS transport layer** — broken as above. The session key is fully recoverable from the observed ECDHE handshake. Harvest-now-decrypt-later applies to all recorded traffic.
+- **ECDH challenge-response** — broken as above. Identity verification collapses; a quantum attacker impersonates any peer.
+- **ECDSA authorship signatures** — broken as above. Per-message authorship is forgeable.
+- **AES-256-GCM message content** — survives at ~128-bit effective security. The only in-transit component that holds under quantum attack — but it is only reachable after DTLS and ECDH are already broken, so in practice it provides no meaningful residual protection in a post-quantum threat scenario.
+
+*At-rest:*
+- **WebAuthn PRF → HKDF → AES-256-GCM master key** — the PRF output and HKDF are symmetric/hash operations, not EC-based. This derivation chain is quantum-resistant. The master key itself is AES-256 and survives Grover's at ~128-bit effective security.
+- **ECDSA private key stored encrypted under master key** — the storage encryption holds. However, the key being protected is an EC private key whose corresponding public key has been broadcast. If the public key was observed, Shor's recovers the private key directly, making the at-rest encryption of it somewhat beside the point — the attacker doesn't need to steal it from storage.
+- **All AES-256-GCM encrypted Tier 3 storage** — survives. Message history, contact records, and file blobs encrypted under the master key remain protected at ~128-bit effective security under Grover's.
+
+**Roadmap — post-quantum remediation requires two separate schemes:**
+
+| Layer | Quantum fix |
+|---|---|
+| ECDH session key derivation (challenge + message encryption) | **ML-KEM** (CRYSTALS-Kyber, NIST-standardized) — run hybrid alongside ECDH; shared key derived from both outputs. Quantum-resistant if either primitive holds. Browser-compatible libraries available today. |
+| DTLS handshake | Browser/WebRTC platform must adopt post-quantum DTLS — not addressable at the application layer. Chrome has begun deploying ML-KEM for TLS 1.3; WebRTC DataChannels are expected to follow. No app-level workaround exists in the interim. |
+| ECDSA authorship signatures | **ML-DSA** (CRYSTALS-Dilithium, NIST-standardized) — replaces ECDSA for per-message signing. Cannot reuse ML-KEM here; KEM and signature are distinct schemes requiring separate primitives. Browser-compatible libraries available today. |
+
+ML-KEM for ECDH and ML-DSA for authorship signatures are both implementable today at the application layer. DTLS post-quantum support is a platform dependency with no application-layer workaround. For most consumer deployments this full remediation is premature; for high-sensitivity use it is a concrete roadmap rather than a theoretical one.
+
+## 12. Accepted Residual Risks (Post-Remediation)
 
 | Risk | Severity | Notes |
 |---|---|---|
